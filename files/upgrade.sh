@@ -68,7 +68,7 @@ valid_tag() {
     case "$tag" in
         *[!0-9A-Za-z._-]*) return 1 ;;
     esac
-    U_TAG="$tag" ucode -e 'exit(match(getenv("U_TAG"), /^v[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?$/) ? 0 : 1);'
+    U_TAG="$tag" ucode -e 'exit(match(getenv("U_TAG"), /^v[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+-lgbm$/) ? 0 : 1);'
 }
 
 write_state() {
@@ -141,9 +141,9 @@ fetch_release_info() {
         import { readfile } from "fs";
 
         function parse_ver(v) {
-            const m = match(v || "", /^v?([0-9]+)\.([0-9]+)\.([0-9]+)(-r([0-9]+))?$/);
+            const m = match(v || "", /^([0-9]+)\.([0-9]+)\.([0-9]+)l-r([0-9]+)$/);
             if (!m) return null;
-            return [int(m[1]), int(m[2]), int(m[3]), int(m[5] || "0")];
+            return [int(m[1]), int(m[2]), int(m[3]), int(m[4])];
         }
 
         function cmp_ver(a, b) {
@@ -195,21 +195,18 @@ fetch_release_info() {
             if (rel.draft) continue;
             const tag = rel.tag_name || "";
             if (want_tag != "" && tag != want_tag) continue;
-            const ver = replace(tag, /^v/, "");
-            if (!parse_ver(ver)) continue;
+            const release_ver = match(tag, /^v([0-9]+\.[0-9]+\.[0-9]+)-r([0-9]+)-lgbm$/);
+            if (!release_ver) continue;
+            const ver = sprintf("%sl-r%s", release_ver[1], release_ver[2]);
             const want_names = expected_assets(ver, arch, ext);
             let pkg_asset = null;
-            let sum_all = null;
-            let sum_single = null;
+            let sum_asset = null;
             for (let a in (rel.assets || [])) {
                 if (!pkg_asset && index(want_names, a.name) >= 0)
                     pkg_asset = a;
-                else if (match(a.name, /^SHA256SUMS-r[0-9]+-all$/))
-                    sum_all = a;
-                else if (match(a.name, /^SHA256SUMS-r[0-9]+$/))
-                    sum_single = a;
+                else if (match(a.name, /^SHA256SUMS-r[0-9]+-lgbm-all$/))
+                    sum_asset = a;
             }
-            const sum_asset = sum_all || (ext == "apk" && arch == "aarch64_cortex-a53" ? sum_single : null);
             if (!pkg_asset || !sum_asset) continue;
             const pkg_url = pkg_asset.browser_download_url || "";
             const sum_url = sum_asset.browser_download_url || "";

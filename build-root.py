@@ -781,7 +781,7 @@ const methods = {
         args: { tag: 'tag' },
         call: function(req) {
             const tag = req.args?.tag || '';
-            if (tag != '' && !match(tag, /^v[0-9]+\.[0-9]+\.[0-9]+(-r[0-9]+)?$/))
+            if (tag != '' && !match(tag, /^v[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+-lgbm$/))
                 return { ok: false, error: 'Invalid release tag' };
             const cmd = tag != '' ? '/etc/nikkic/scripts/upgrade.sh start ' + tag : '/etc/nikkic/scripts/upgrade.sh start';
             const process = popen(cmd);
@@ -1423,10 +1423,6 @@ if archive.is_dir():
         text = replace_once(text, f"{capability}:n,", f"{capability}:n&&!{is_concord},")
     text = replace_once(text, "coreUpdateCheck:e,configPatch:e,", f"coreUpdateCheck:e&&!{is_concord},configPatch:e,")
     text = replace_once(text, "zw.value&&Km.value&&Gw()", "zw.value&&Km.value&&jx(`dashboardUpgrade`)&&Gw()")
-    text = replace_once(text, "Jx.value&&e.push({key:GB.flushSmartWeights",
-                        f"Jx.value&&!{is_concord}&&e.push({{key:GB.flushSmartWeights")
-    text = replace_once(text, "fetchSmartWeights:async()=>(await xse()).data.weights",
-                        f"fetchSmartWeights:async()=>{is_concord}?{{}}:(await xse()).data.weights")
     # Preserve the grid and displayed values. Concord only hot-patches mixed-port.
     text = replace_once(text, "YUe=[`id`,`value`,`onChange`]", "YUe=[`id`,`value`,`readOnly`,`title`,`onChange`]")
     text = replace_once(text, "s=async(e,t)=>{let n=Number(t.target.value);try{await zS",

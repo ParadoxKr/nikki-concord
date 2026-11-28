@@ -1,0 +1,3527 @@
+diff --git a/crates/config/src/general.rs b/crates/config/src/general.rs
+index bc6956a..20cb80b 100644
+--- a/crates/config/src/general.rs
++++ b/crates/config/src/general.rs
+@@ -73,6 +73,9 @@ pub struct General {
+     pub global_ua: String,
+     pub geo_auto_update: bool,
+     pub geo_update_interval: u32,
++    pub lgbm_auto_update: bool,
++    pub lgbm_update_interval: u32,
++    pub lgbm_url: String,
+     pub external_controller: String,
+     pub secret: String,
+     pub external_controller_cors: ControllerCors,
+@@ -107,6 +110,9 @@ impl Default for General {
+             global_ua: DEFAULT_GLOBAL_UA.to_string(),
+             geo_auto_update: false,
+             geo_update_interval: 24,
++            lgbm_auto_update: false,
++            lgbm_update_interval: 72,
++            lgbm_url: String::new(),
+             external_controller: String::new(),
+             secret: String::new(),
+             external_controller_cors: ControllerCors::default(),
+@@ -200,6 +206,10 @@ impl General {
+         general.geo_auto_update = f.boolean("geo-auto-update")?;
+         general.geo_update_interval =
+             f.loose("geo-update-interval", general.geo_update_interval)?;
++        general.lgbm_auto_update = f.boolean("lgbm-auto-update")?;
++        general.lgbm_update_interval =
++            f.loose("lgbm-update-interval", general.lgbm_update_interval)?;
++        general.lgbm_url = f.string("lgbm-url")?;
+         general.external_controller = f.string("external-controller")?;
+         general.secret = f.string("secret")?;
+         if let Some(mut cors) = f.sub("external-controller-cors")? {
+diff --git a/crates/config/src/group.rs b/crates/config/src/group.rs
+index e5ffb55..2b9f06f 100644
+--- a/crates/config/src/group.rs
++++ b/crates/config/src/group.rs
+@@ -95,6 +95,7 @@ pub struct GroupDef {
+     pub icon: String,
+     pub tolerance: u16,
+     pub policy_priority: Vec<PriorityRule>,
++    pub use_lightgbm: bool,
+     pub default_selected: String,
+     pub strategy: LbStrategy,
+     pub hash_key: String,
+@@ -173,8 +174,8 @@ fn parse_policy_priority(text: &str, f: &mut Fields<'_>) -> Vec<PriorityRule> {
+ fn read_smart(def: &mut GroupDef, f: &mut Fields<'_>) -> Result<()> {
+     def.tolerance = u16::try_from(f.u32("tolerance")?).unwrap_or(u16::MAX);
+     def.policy_priority = parse_policy_priority(&f.string("policy-priority")?, f);
++    def.use_lightgbm = f.boolean("uselightgbm")?;
+     for (key, why) in [
+-        ("uselightgbm", "this core does not use a LightGBM model"),
+         ("collectdata", "this core does not collect training data"),
+         ("sample-rate", "this core does not collect training data"),
+         ("prefer-asn", "this core does not key nodes by ASN"),
+@@ -548,7 +549,8 @@ mod tests {
+                 .collect::<Vec<_>>()
+         };
+         assert!(warned(json!({"uselightgbm": false, "collectdata": false})).is_empty());
+-        assert_eq!(warned(json!({"uselightgbm": true})), ["uselightgbm"]);
++        assert!(warned(json!({"uselightgbm": true})).is_empty());
++        assert!(group(json!({"name": "s", "type": "smart", "proxies": ["a"], "uselightgbm": true})).unwrap().use_lightgbm);
+         assert_eq!(
+             warned(json!({"collectdata": true, "sample-rate": 0.5, "prefer-asn": true})),
+             ["collectdata", "sample-rate", "prefer-asn"]
+diff --git a/crates/config/src/keys.rs b/crates/config/src/keys.rs
+index 91815f6..640375b 100644
+--- a/crates/config/src/keys.rs
++++ b/crates/config/src/keys.rs
+@@ -87,7 +87,6 @@ pub const GROUP: Tiers = tiers(
+         "routing-mark",
+         "interface-name",
+         "dialer-proxy",
+-        "uselightgbm",
+         "collectdata",
+         "sample-rate",
+         "prefer-asn",
+@@ -119,6 +118,7 @@ pub const GROUP_T0: &[&str] = &[
+     "icon",
+     "tolerance",
+     "policy-priority",
++    "uselightgbm",
+     "default-selected",
+     "strategy",
+     "hash-key",
+@@ -167,6 +167,9 @@ pub const TOP_T0: &[&str] = &[
+     "geox-url",
+     "geo-auto-update",
+     "geo-update-interval",
++    "lgbm-auto-update",
++    "lgbm-update-interval",
++    "lgbm-url",
+     "profile",
+     "mitm",
+ ];
+@@ -205,9 +208,6 @@ pub const TOP_T2: &[&str] = &[
+     "external-ui-name",
+     "external-doh-server",
+     "global-client-fingerprint",
+-    "lgbm-auto-update",
+-    "lgbm-update-interval",
+-    "lgbm-url",
+ ];
+ 
+ pub const DNS_T0: &[&str] = &[
+diff --git a/crates/config/tests/tiers.rs b/crates/config/tests/tiers.rs
+index c85955a..61a929b 100644
+--- a/crates/config/tests/tiers.rs
++++ b/crates/config/tests/tiers.rs
+@@ -168,6 +168,9 @@ const SAMPLES: &[(&str, &str)] = &[
+     ("tun.enable", "tun: {enable: true}"),
+     ("tun.device", "tun: {device: utun9}"),
+     ("tun.auto-route", "tun: {auto-route: false}"),
++    ("lgbm-auto-update", "lgbm-auto-update: true"),
++    ("lgbm-update-interval", "lgbm-update-interval: 24"),
++    ("lgbm-url", "lgbm-url: https://example.com/Model.bin"),
+     (
+         "tun.auto-detect-interface",
+         "tun: {auto-detect-interface: false}",
+@@ -462,7 +465,14 @@ fn smart_group_keys_have_tiers_and_the_unsupported_ones_warn() {
+     let changed = load_str(&text("policy-priority: 'hk:1.5'"), &LoadOptions::default()).unwrap();
+     assert_ne!(changed.groups[0], base.groups[0]);
+     assert!(changed.report.warnings.is_empty());
+-    for key in ["uselightgbm", "collectdata", "sample-rate", "prefer-asn"] {
++    assert_eq!(
++        concord_config::keys::GROUP.of("uselightgbm"),
++        Some(Tier::T0)
++    );
++    let lgbm_on = load_str(&text("uselightgbm: true"), &LoadOptions::default()).unwrap();
++    assert!(lgbm_on.groups[0].use_lightgbm);
++    assert!(lgbm_on.report.warnings.is_empty());
++    for key in ["collectdata", "sample-rate", "prefer-asn"] {
+         assert_eq!(concord_config::keys::GROUP.of(key), Some(Tier::T2), "{key}");
+         let warned = load_str(&text(&format!("{key}: true")), &LoadOptions::default()).unwrap();
+         assert!(
+@@ -478,13 +488,20 @@ fn smart_group_keys_have_tiers_and_the_unsupported_ones_warn() {
+ 
+ #[test]
+ fn smart_collector_and_lgbm_keys_are_warned_as_unsupported() {
+-    for (text, path) in [
+-        ("lgbm-url: https://x", "lgbm-url"),
+-        (
+-            "profile: {smart-collector-size: 50}",
+-            "profile.smart-collector-size",
+-        ),
+-    ] {
++    let lgbm_loaded = load_str(
++        "lgbm-url: https://example.com/Model.bin\nlgbm-auto-update: true\nlgbm-update-interval: 24\nrules:\n  - MATCH,DIRECT\n",
++        &LoadOptions::default(),
++    )
++    .unwrap();
++    assert_eq!(lgbm_loaded.general.lgbm_url, "https://example.com/Model.bin");
++    assert!(lgbm_loaded.general.lgbm_auto_update);
++    assert_eq!(lgbm_loaded.general.lgbm_update_interval, 24);
++    assert!(lgbm_loaded.report.warnings.is_empty());
++
++    for (text, path) in [(
++        "profile: {smart-collector-size: 50}",
++        "profile.smart-collector-size",
++    )] {
+         let (_, warnings) = loaded(text).unwrap();
+         assert!(
+             warnings.contains(&(path.to_string(), "unsupported_key")),
+diff --git a/crates/controller/src/routes.rs b/crates/controller/src/routes.rs
+index 13cc33a..2f1f58f 100644
+--- a/crates/controller/src/routes.rs
++++ b/crates/controller/src/routes.rs
+@@ -53,6 +53,9 @@ impl Routes {
+             (&Method::GET, ["logs"]) => self.logs(request).await,
+             (_, ["configs", ..]) => self.configs(request, &method, &path[1..]).await,
+             (_, ["proxies", rest @ ..]) => self.proxies(request, &method, rest).await,
++            (&Method::GET, ["group", "weights"]) => {
++                json(&json!({ "weights": self.control.engine().smart_weights() }))
++            }
+             (&Method::GET, ["group", rest @ ..]) => self.groups(request, rest).await,
+             (&Method::GET, ["rules"]) => json(&shapes::rules(&self.control.controller_rules())),
+             (&Method::PATCH, ["rules", "disable"]) => self.disable_rules(request).await,
+@@ -71,6 +74,10 @@ impl Routes {
+                 let _ = self.control.dns_clear_cache(Empty {}).await;
+                 empty(StatusCode::NO_CONTENT)
+             }
++            (&Method::POST, ["cache", "smart", "flush"]) => {
++                self.control.engine().flush_smart_weights();
++                empty(StatusCode::NO_CONTENT)
++            }
+             (&Method::GET, ["dns", "query"]) => self.dns_query(&request).await,
+             (_, ["restart" | "upgrade" | "debug" | "storage" | "ui", ..]) => unsupported(),
+             (
+@@ -80,7 +87,7 @@ impl Routes {
+                 | ["group", _]
+                 | ["group", _, "delay"]
+                 | ["rules", "disable"]
+-                | ["cache", "fakeip" | "dns", "flush"]
++                | ["cache", "fakeip" | "dns" | "smart", "flush"]
+                 | ["dns", "query"],
+             ) => method_not_allowed(),
+             _ => not_found_text(),
+diff --git a/crates/engine/src/apply.rs b/crates/engine/src/apply.rs
+index 232fb80..b961b4f 100644
+--- a/crates/engine/src/apply.rs
++++ b/crates/engine/src/apply.rs
+@@ -395,6 +395,8 @@ pub(crate) struct Shared {
+     pub proxy_tasks: Arc<crate::proxy_tasks::ProxyTasks>,
+     pub scripts: Arc<concord_common::scripts::ScriptSlot>,
+     pub carried: Arc<crate::inbounds::Carried>,
++    pub smart_model: Arc<ArcSwapOption<concord_group::WeightModel>>,
++    pub smart_model_loading: Arc<AtomicBool>,
+ }
+ 
+ /// Why a config could not be applied. Only the text reaches the host, as the failure message.
+diff --git a/crates/engine/src/engine.rs b/crates/engine/src/engine.rs
+index 1d0587e..8a78365 100644
+--- a/crates/engine/src/engine.rs
++++ b/crates/engine/src/engine.rs
+@@ -208,6 +208,8 @@ impl Engine {
+             proxy_tasks,
+             scripts: Arc::default(),
+             carried: Arc::default(),
++            smart_model: Arc::new(ArcSwapOption::empty()),
++            smart_model_loading: Arc::new(AtomicBool::new(false)),
+         };
+         Arc::new(Engine {
+             home: ArcSwapOption::empty(),
+@@ -314,6 +316,154 @@ impl Engine {
+         concord_platform::release_free_memory();
+     }
+ 
++    pub fn smart_weights(
++        &self,
++    ) -> std::collections::HashMap<String, std::collections::HashMap<String, f64>> {
++        self.outbounds()
++            .map(|outbounds| outbounds.smart_weights())
++            .unwrap_or_default()
++    }
++
++    pub fn flush_smart_weights(&self) {
++        if let Some(outbounds) = self.outbounds() {
++            outbounds.flush_smart_weights();
++        }
++    }
++
++    fn sync_smart_model(
++        &self,
++        home: &Arc<HomeDir>,
++        general: &concord_config::general::General,
++        outbounds: &Arc<Outbounds>,
++        stop: CancellationToken,
++    ) {
++        if !outbounds.has_smart_lightgbm() {
++            return;
++        }
++        if let Some(existing) = self.shared.smart_model.load_full() {
++            outbounds.set_smart_model(Some(existing));
++        }
++        if self
++            .shared
++            .smart_model_loading
++            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
++            .is_err()
++        {
++            return;
++        }
++        let home = home.clone();
++        let outbounds = outbounds.clone();
++        let smart_model = self.shared.smart_model.clone();
++        let loading = self.shared.smart_model_loading.clone();
++        let fetcher = self.shared.fetcher.clone();
++        let auto_update = general.lgbm_auto_update;
++        let interval_hours = u64::from(general.lgbm_update_interval.max(1));
++        let url = if general.lgbm_url.is_empty() {
++            concord_group::DEFAULT_LGBM_URL.to_string()
++        } else {
++            general.lgbm_url.clone()
++        };
++
++        self.tasks.spawn(async move {
++            struct ClearGuard(Arc<AtomicBool>);
++            impl Drop for ClearGuard {
++                fn drop(&mut self) {
++                    self.0.store(false, Ordering::Release);
++                }
++            }
++            let _guard = ClearGuard(loading);
++            let model_path = home.root().join("Model.bin");
++
++            let mut need_download = !model_path.is_file();
++            if !need_download && smart_model.load().is_none() {
++                let p = model_path.clone();
++                match tokio::task::spawn_blocking(move || concord_group::WeightModel::load_from_file(&p)).await {
++                    Ok(Ok(model)) => {
++                        let model = Arc::new(model);
++                        tracing::info!(
++                            "[Smart] Loaded LightGBM Model.bin ({} trees, {} features)",
++                            model.n_trees(),
++                            model.n_features()
++                        );
++                        smart_model.store(Some(model.clone()));
++                        outbounds.set_smart_model(Some(model));
++                        concord_platform::release_free_memory();
++                    }
++                    Ok(Err(err)) => {
++                        tracing::warn!("[Smart] Invalid Model.bin ({err}), will re-download");
++                        need_download = true;
++                    }
++                    Err(err) => {
++                        tracing::warn!("[Smart] Model.bin loader task failed: {err}");
++                        return;
++                    }
++                }
++            }
++
++            if !need_download && auto_update {
++                if let Ok(meta) = std::fs::metadata(&model_path)
++                    && let Ok(modified) = meta.modified()
++                    && let Ok(age) = std::time::SystemTime::now().duration_since(modified)
++                    && age >= Duration::from_secs(interval_hours.saturating_mul(3600))
++                {
++                    need_download = true;
++                }
++            }
++
++            if !need_download || stop.is_cancelled() {
++                return;
++            }
++
++            tracing::info!("[Smart] Downloading LightGBM Model.bin from {url}");
++            let req = concord_group::FetchRequest {
++                url,
++                headers: Vec::new(),
++                via_proxy: None,
++                size_limit: Some(64 << 20),
++                timeout: Duration::from_secs(120),
++            };
++            let spilled = tokio::select! {
++                () = stop.cancelled() => return,
++                res = crate::resources::download_spilled(fetcher.as_ref(), req, home.root()) => match res {
++                    Ok(spilled) => spilled,
++                    Err(err) => {
++                        tracing::warn!("[Smart] Failed to download Model.bin: {err}");
++                        return;
++                    }
++                }
++            };
++            let home_for_store = home.clone();
++            let parsed = tokio::task::spawn_blocking(move || -> std::io::Result<concord_group::WeightModel> {
++                let mapped = spilled.bytes()?;
++                let model = concord_group::WeightModel::load_from_bytes(&mapped)?;
++                drop(mapped);
++                spilled.store(&home_for_store, "Model.bin")?;
++                Ok(model)
++            })
++            .await;
++
++            match parsed {
++                Ok(Ok(model)) => {
++                    let model = Arc::new(model);
++                    tracing::info!(
++                        "[Smart] Downloaded and loaded LightGBM Model.bin ({} trees, {} features)",
++                        model.n_trees(),
++                        model.n_features()
++                    );
++                    smart_model.store(Some(model.clone()));
++                    outbounds.set_smart_model(Some(model));
++                    concord_platform::release_free_memory();
++                }
++                Ok(Err(err)) => {
++                    tracing::warn!("[Smart] Downloaded Model.bin rejected: {err}");
++                }
++                Err(err) => {
++                    tracing::warn!("[Smart] Model.bin parse task failed: {err}");
++                }
++            }
++        });
++    }
++
+     fn apply_options(&self, options: &CoreOptions) {
+         let mut current = (**self.shared.options.current.load()).clone();
+         if !options.test_url.is_empty() {
+@@ -426,6 +576,7 @@ impl Engine {
+         self.start_ntp(&applied, &outbounds);
+         let answered = lock(&self.answered).clone();
+         outbounds.start_background(applied.stop.clone(), answered.clone());
++        self.sync_smart_model(&home, &applied.general, &outbounds, applied.stop.clone());
+         self.own.spawn_to_end(report_revoked(
+             selections,
+             self.intent.clone(),
+diff --git a/crates/engine/src/resources.rs b/crates/engine/src/resources.rs
+index 43f51fa..68be12d 100644
+--- a/crates/engine/src/resources.rs
++++ b/crates/engine/src/resources.rs
+@@ -2,8 +2,6 @@ mod fetch;
+ mod geo;
+ mod rule_providers;
+ 
+-#[cfg(feature = "mitm")]
+-pub(crate) use self::fetch::download_spilled;
+-pub(crate) use self::fetch::{Identity, TunnelFetcher, download};
++pub(crate) use self::fetch::{Identity, TunnelFetcher, download, download_spilled};
+ pub(crate) use self::geo::{GeoUpdater, GeoUrls, geo_file_of};
+ pub(crate) use self::rule_providers::{RuleProvider, RuleProviders, behavior_of, rule_set_request};
+diff --git a/crates/group/src/group.rs b/crates/group/src/group.rs
+index e64cb15..be4c512 100644
+--- a/crates/group/src/group.rs
++++ b/crates/group/src/group.rs
+@@ -31,7 +31,11 @@ pub enum Touch {
+ pub enum Policy {
+     Select { default_selected: Arc<str> },
+     UrlTest { tolerance: u16 },
+-    Smart { tolerance: u16, priority: Priority },
++    Smart {
++        tolerance: u16,
++        priority: Priority,
++        use_lightgbm: bool,
++    },
+     Fallback,
+     LoadBalance(Strategy),
+     Relay,
+@@ -137,11 +141,17 @@ pub struct Group {
+ impl Group {
+     pub(crate) fn new(parts: GroupParts) -> Arc<Group> {
+         let smart = match &parts.policy {
+-            Policy::Smart { tolerance, .. } => Some(Owner::new(
++            Policy::Smart {
++                tolerance,
++                use_lightgbm,
++                ..
++            } => Some(Owner::new(
+                 *tolerance,
+                 parts.max_failed,
+                 parts.interval,
+                 parts.test_timeout,
++                *use_lightgbm,
++                parts.shared.smart_model.clone(),
+             )),
+             _ => None,
+         };
+diff --git a/crates/group/src/lib.rs b/crates/group/src/lib.rs
+index 3a3d2d2..bd3a92c 100644
+--- a/crates/group/src/lib.rs
++++ b/crates/group/src/lib.rs
+@@ -39,6 +39,6 @@ pub use node::{Ghost, Item, Leaf, Node};
+ pub use outbounds::{Outbounds, Resolved, SelectError, Staged, load_balancer_exit, node_exit};
+ pub use provider::{ProviderNodes, ProviderView, ProxyProvider, SubscriptionInfo, VehicleType};
+ pub use selection::SelectionStore;
+-pub use smart::{FlowEnd, SmartFlow};
++pub use smart::{DEFAULT_LGBM_URL, FlowEnd, SmartFlow, WeightModel, lgbm};
+ pub use strategy::Strategy;
+ pub use views::{GroupView, NodeStateView, NodeView, ProxyView, ProxyViews};
+diff --git a/crates/group/src/outbounds/build.rs b/crates/group/src/outbounds/build.rs
+index a54f3e3..09efaf2 100644
+--- a/crates/group/src/outbounds/build.rs
++++ b/crates/group/src/outbounds/build.rs
+@@ -71,6 +71,7 @@ fn policy_of(def: &GroupDef) -> Policy {
+         GroupKind::Smart => Policy::Smart {
+             tolerance: def.tolerance,
+             priority: Priority::compile(&def.policy_priority),
++            use_lightgbm: def.use_lightgbm,
+         },
+         GroupKind::Fallback => Policy::Fallback,
+         GroupKind::LoadBalance => {
+diff --git a/crates/group/src/outbounds/smart.rs b/crates/group/src/outbounds/smart.rs
+index 7047acc..cc5235e 100644
+--- a/crates/group/src/outbounds/smart.rs
++++ b/crates/group/src/outbounds/smart.rs
+@@ -6,7 +6,7 @@ use concord_common::{CoreError, FlowMeta, Network};
+ use concord_platform::is_local_exhaustion;
+ 
+ use super::{Entry, Outbounds, Resolved};
+-use crate::group::{Group, Members, Touch};
++use crate::group::{Group, Members, Policy, Touch};
+ use crate::node::Node;
+ use crate::smart::{FailKind, Owner, SmartFlow, Stamp, run};
+ use crate::strategy::destination_key;
+@@ -115,16 +115,71 @@ impl Outbounds {
+     }
+ 
+     pub fn smart_flow(&self, chain: &[Arc<str>], site: &Arc<str>, tls: bool) -> Option<SmartFlow> {
++        self.smart_flow_with_meta(chain, site, tls, 443, None)
++    }
++
++    pub fn smart_flow_with_meta(
++        &self,
++        chain: &[Arc<str>],
++        site: &Arc<str>,
++        tls: bool,
++        dst_port: u16,
++        dst_ip: Option<Arc<str>>,
++    ) -> Option<SmartFlow> {
+         let taps: Vec<_> = self
+             .smart_on(chain)
+             .map(|on| {
+-                let tap = on.owner.state().flow(on.member.clone(), site.clone(), tls);
++                let tap = on.owner.state().flow_with_meta(
++                    on.member.clone(),
++                    site.clone(),
++                    tls,
++                    dst_port,
++                    dst_ip.clone(),
++                );
+                 (on.group.clone(), tap)
+             })
+             .collect();
+         (!taps.is_empty()).then(|| SmartFlow::new(taps))
+     }
+ 
++    pub fn has_smart_lightgbm(&self) -> bool {
++        self.groups.iter().any(|group| {
++            matches!(
++                group.policy(),
++                Policy::Smart {
++                    use_lightgbm: true,
++                    ..
++                }
++            )
++        })
++    }
++
++    pub fn set_smart_model(&self, model: Option<Arc<crate::smart::WeightModel>>) {
++        self.shared.smart_model.store(model);
++    }
++
++    pub fn flush_smart_weights(&self) {
++        for group in &self.groups {
++            if let Some(owner) = group.smart() {
++                owner.flush_smart_weights();
++            }
++        }
++    }
++
++    pub fn smart_weights(&self) -> std::collections::HashMap<String, std::collections::HashMap<String, f64>> {
++        let mut all = std::collections::HashMap::new();
++        for group in &self.groups {
++            if let Some(owner) = group.smart() {
++                let members = group.members();
++                let weights = owner.smart_weights(group, &members);
++                if !weights.is_empty() {
++                    all.insert(group.name().to_string(), weights);
++                }
++            }
++        }
++        all
++    }
++
+     /// Which network each smart group was on, in `self.groups` order, for `feed_smart` to pass back.
+     pub(crate) fn smart_epochs(&self) -> Vec<Option<u64>> {
+         self.groups
+diff --git a/crates/group/src/shared.rs b/crates/group/src/shared.rs
+index 3271eb4..5efd8d6 100644
+--- a/crates/group/src/shared.rs
++++ b/crates/group/src/shared.rs
+@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
+ use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
++use arc_swap::ArcSwapOption;
+ use concord_common::sync::lock;
+ use concord_common::{CoreEvent, EventSink};
+ use concord_platform::HomeDir;
+@@ -15,6 +16,7 @@ use crate::deps::{
+ };
+ use crate::fetch::Fetcher;
+ use crate::selection::SelectionStore;
++use crate::smart::WeightModel;
+ 
+ const LOOP_REPORT_INTERVAL: Duration = Duration::from_secs(3);
+ 
+@@ -31,6 +33,7 @@ pub(crate) struct Shared {
+     pub refresh: Notify,
+     loop_reports: Mutex<HashMap<Arc<str>, Instant>>,
+     pub missing_reported: AtomicBool,
++    pub smart_model: Arc<ArcSwapOption<WeightModel>>,
+ }
+ 
+ impl Shared {
+@@ -48,6 +51,7 @@ impl Shared {
+             refresh: Notify::new(),
+             loop_reports: Mutex::new(HashMap::new()),
+             missing_reported: AtomicBool::new(false),
++            smart_model: Arc::new(ArcSwapOption::empty()),
+         })
+     }
+ 
+diff --git a/crates/group/src/smart/diff_tests.rs b/crates/group/src/smart/diff_tests.rs
+index b22dfd0..8d5715e 100644
+--- a/crates/group/src/smart/diff_tests.rs
++++ b/crates/group/src/smart/diff_tests.rs
+@@ -895,6 +895,11 @@ fn book_alignment_and_streaming_selection_match_reference_across_edge_cases() {
+             site: &Arc::from("p.org"),
+             upload_at: Some(t0),
+             tls: false,
++            dst_port: 443,
++            dst_ip: None,
++            started_at: t0,
++            upload_bytes: 0,
++            download_bytes: 0,
+         };
+         let done_at = t0.after(Duration::from_millis(ms));
+         s4_live.flow_answered(&f_ref, done_at);
+diff --git a/crates/group/src/smart/flow.rs b/crates/group/src/smart/flow.rs
+index e0aebab..d233fde 100644
+--- a/crates/group/src/smart/flow.rs
++++ b/crates/group/src/smart/flow.rs
+@@ -1,4 +1,4 @@
+-use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ use std::sync::{Arc, OnceLock};
+ 
+ use super::{Actions, SmartState, Stamp};
+@@ -12,15 +12,20 @@ pub struct FlowEnd {
+ }
+ 
+ /// One TCP flow through a smart group. After its first call each of `on_upload` and `on_download` is one
+-/// relaxed atomic load.
++/// relaxed atomic load + counter increment.
+ pub struct FlowTap {
+     state: Arc<SmartState>,
+     id: u64,
+     node: Arc<str>,
+     site: Arc<str>,
+     tls: bool,
++    dst_port: u16,
++    dst_ip: Option<Arc<str>>,
++    started_at: Stamp,
+     uploaded: AtomicBool,
+     answered: AtomicBool,
++    upload_bytes: AtomicU64,
++    download_bytes: AtomicU64,
+     upload_at: OnceLock<Stamp>,
+     done: bool,
+ }
+@@ -30,6 +35,11 @@ pub(crate) struct FlowRef<'a> {
+     pub node: &'a Arc<str>,
+     pub site: &'a Arc<str>,
+     pub tls: bool,
++    pub dst_port: u16,
++    pub dst_ip: Option<&'a str>,
++    pub started_at: Stamp,
++    pub upload_bytes: u64,
++    pub download_bytes: u64,
+     pub upload_at: Option<Stamp>,
+ }
+ 
+@@ -40,6 +50,8 @@ impl FlowTap {
+         node: Arc<str>,
+         site: Arc<str>,
+         tls: bool,
++        dst_port: u16,
++        dst_ip: Option<Arc<str>>,
+     ) -> FlowTap {
+         FlowTap {
+             state,
+@@ -47,21 +59,42 @@ impl FlowTap {
+             node,
+             site,
+             tls,
++            dst_port,
++            dst_ip,
++            started_at: Stamp::now(),
+             uploaded: AtomicBool::new(false),
+             answered: AtomicBool::new(false),
++            upload_bytes: AtomicU64::new(0),
++            download_bytes: AtomicU64::new(0),
+             upload_at: OnceLock::new(),
+             done: false,
+         }
+     }
+ 
++    #[cfg(test)]
+     pub fn on_upload(&self) {
++        self.on_upload_bytes(0);
++    }
++
++    pub fn on_upload_bytes(&self, bytes: u64) {
++        if bytes > 0 {
++            self.upload_bytes.fetch_add(bytes, Ordering::Relaxed);
++        }
+         if self.uploaded.load(Ordering::Relaxed) {
+             return;
+         }
+         self.first_upload();
+     }
+ 
++    #[cfg(test)]
+     pub fn on_download(&self) {
++        self.on_download_bytes(0);
++    }
++
++    pub fn on_download_bytes(&self, bytes: u64) {
++        if bytes > 0 {
++            self.download_bytes.fetch_add(bytes, Ordering::Relaxed);
++        }
+         if self.answered.load(Ordering::Relaxed) {
+             return;
+         }
+@@ -105,6 +138,11 @@ impl FlowTap {
+             node: &self.node,
+             site: &self.site,
+             tls: self.tls,
++            dst_port: self.dst_port,
++            dst_ip: self.dst_ip.as_deref(),
++            started_at: self.started_at,
++            upload_bytes: self.upload_bytes.load(Ordering::Relaxed),
++            download_bytes: self.download_bytes.load(Ordering::Relaxed),
+             upload_at: self.upload_at.get().copied(),
+         }
+     }
+diff --git a/crates/group/src/smart/lgbm.rs b/crates/group/src/smart/lgbm.rs
+new file mode 100644
+index 0000000..e96e7a2
+--- /dev/null
++++ b/crates/group/src/smart/lgbm.rs
+@@ -0,0 +1,2189 @@
++//! Pure-Rust LightGBM v4 inference engine and feature pipeline compatible with
++//! vernesong/mihomo's `Model.bin` (including embedded `[transforms]` scalers) and
++//! heuristic fallback weight calculation.
++
++use std::collections::HashMap;
++use std::fs::File;
++use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
++use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
++use std::path::Path;
++use std::time::{SystemTime, UNIX_EPOCH};
++
++pub const DEFAULT_LGBM_URL: &str =
++    "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin";
++pub const DEFAULT_MIN_SAMPLE_COUNT: i64 = 2;
++pub const MAX_FEATURE_SIZE: usize = 32;
++const MAX_MODEL_FEATURE_SLOTS: usize = 4096;
++const ZERO_THRESHOLD: f64 = 1e-35;
++
++const FLAG_CATEGORICAL: u8 = 1 << 0;
++const FLAG_DEFAULT_LEFT: u8 = 1 << 1;
++const FLAG_LEFT_LEAF: u8 = 1 << 2;
++const FLAG_RIGHT_LEAF: u8 = 1 << 3;
++const FLAG_MISSING_ZERO: u8 = 1 << 4;
++const FLAG_MISSING_NAN: u8 = 1 << 5;
++const FLAG_CAT_ONE_HOT: u8 = 1 << 6;
++const FLAG_CAT_SMALL: u8 = 1 << 7;
++
++const DEFAULT_FEATURE_ORDER: [&str; MAX_FEATURE_SIZE] = [
++    "success",
++    "failure",
++    "connect_time",
++    "latency",
++    "upload_mb",
++    "history_upload_mb",
++    "maxuploadrate_kb",
++    "history_maxuploadrate_kb",
++    "download_mb",
++    "history_download_mb",
++    "maxdownloadrate_kb",
++    "history_maxdownloadrate_kb",
++    "duration_minutes",
++    "history_duration_minutes",
++    "last_used_seconds",
++    "is_udp",
++    "is_tcp",
++    "loss_rate",
++    "cumul_loss_rate",
++    "asn_feature",
++    "country_feature",
++    "address_feature",
++    "port_feature",
++    "traffic_ratio",
++    "traffic_density",
++    "connection_type_feature",
++    "asn_hash",
++    "host_hash",
++    "ip_hash",
++    "geoip_hash",
++    "exit_region",
++    "exit_asn_hash",
++];
++
++#[derive(Clone, Debug, Default)]
++pub struct ModelInput {
++    pub success: i64,
++    pub failure: i64,
++    pub connect_time_ms: i64,
++    pub latency_ms: i64,
++
++    pub upload_mb: f64,
++    pub history_upload_mb: f64,
++    pub max_upload_rate_kb: f64,
++    pub history_max_upload_rate_kb: f64,
++
++    pub download_mb: f64,
++    pub history_download_mb: f64,
++    pub max_download_rate_kb: f64,
++    pub history_max_download_rate_kb: f64,
++
++    pub duration_minutes: f64,
++    pub history_duration_minutes: f64,
++    pub last_used_unix: i64,
++
++    pub is_udp: bool,
++    pub is_tcp: bool,
++    pub connection_failed: bool,
++    pub loss_rate: f64,
++    pub cumul_loss_rate: f64,
++    pub ema_loss_rate: f64,
++
++    pub dest_ip_asn: String,
++    pub host: String,
++    pub dest_ip: String,
++    pub dest_port: u16,
++    pub dest_geoip: String,
++
++    pub exit_region: String,
++    pub exit_asn: String,
++}
++
++#[derive(Clone, Copy, Debug)]
++struct LgbmNode {
++    threshold: f64,
++    left: u32,
++    right: u32,
++    feature: u16,
++    flags: u8,
++}
++
++#[derive(Debug)]
++struct LinearLeaf {
++    constant: f64,
++    features: Box<[u16]>,
++    coeffs: Box<[f64]>,
++}
++
++#[derive(Debug)]
++struct LgbmTree {
++    nodes: Box<[LgbmNode]>,
++    leaf_values: Box<[f64]>,
++    cat_boundaries: Box<[u32]>,
++    cat_thresholds: Box<[u32]>,
++    linear_leaves: Option<Box<[LinearLeaf]>>,
++}
++
++impl LgbmTree {
++    #[inline]
++    fn numerical_decision(node: &LgbmNode, mut fval: f64) -> bool {
++        if fval.is_nan() && (node.flags & FLAG_MISSING_NAN == 0) {
++            fval = 0.0;
++        }
++        let is_missing_zero = (node.flags & FLAG_MISSING_ZERO != 0)
++            && (fval > -ZERO_THRESHOLD && fval <= ZERO_THRESHOLD);
++        let is_missing_nan = (node.flags & FLAG_MISSING_NAN != 0) && fval.is_nan();
++        if is_missing_zero || is_missing_nan {
++            return node.flags & FLAG_DEFAULT_LEFT != 0;
++        }
++        fval <= node.threshold
++    }
++
++    #[inline]
++    fn categorical_decision(&self, node: &LgbmNode, fval: f64) -> bool {
++        let ifval = if fval.is_nan() {
++            if node.flags & FLAG_MISSING_NAN != 0 {
++                return false;
++            }
++            0i32
++        } else {
++            fval as i32
++        };
++        if ifval < 0 {
++            return false;
++        }
++        let pos = ifval as u32;
++        if node.flags & FLAG_CAT_ONE_HOT != 0 {
++            return (node.threshold as u32) == pos;
++        }
++        if node.flags & FLAG_CAT_SMALL != 0 {
++            let mask = node.threshold as u32;
++            return pos < 32 && ((mask >> pos) & 1) != 0;
++        }
++        let cat_idx = node.threshold as usize;
++        let Some(&start) = self.cat_boundaries.get(cat_idx) else {
++            return false;
++        };
++        let Some(&end) = self.cat_boundaries.get(cat_idx + 1) else {
++            return false;
++        };
++        let word = (pos / 32) as usize;
++        let start = start as usize;
++        let end = end as usize;
++        if start + word >= end {
++            return false;
++        }
++        let bit = pos % 32;
++        self.cat_thresholds
++            .get(start + word)
++            .is_some_and(|w| ((w >> bit) & 1) != 0)
++    }
++
++    #[inline]
++    fn leaf_output(&self, leaf: usize, fvals: &[f64]) -> f64 {
++        if let Some(linear) = self.linear_leaves.as_ref()
++            && let Some(model) = linear.get(leaf)
++        {
++            let mut sum = model.constant;
++            for (&feat, &coeff) in model.features.iter().zip(model.coeffs.iter()) {
++                let v = fvals.get(feat as usize).copied().unwrap_or(0.0);
++                if v.is_nan() {
++                    return self.leaf_values.get(leaf).copied().unwrap_or(0.0);
++                }
++                sum += coeff * v;
++            }
++            return sum;
++        }
++        self.leaf_values.get(leaf).copied().unwrap_or(0.0)
++    }
++
++    #[inline]
++    fn predict(&self, fvals: &[f64]) -> f64 {
++        if self.nodes.is_empty() {
++            return self.leaf_output(0, fvals);
++        }
++        let mut idx = 0usize;
++        loop {
++            let Some(node) = self.nodes.get(idx) else {
++                return 0.0;
++            };
++            let fval = fvals.get(node.feature as usize).copied().unwrap_or(0.0);
++            let go_left = if node.flags & FLAG_CATEGORICAL != 0 {
++                self.categorical_decision(node, fval)
++            } else {
++                Self::numerical_decision(node, fval)
++            };
++            if go_left {
++                if node.flags & FLAG_LEFT_LEAF != 0 {
++                    return self.leaf_output(node.left as usize, fvals);
++                }
++                idx = node.left as usize;
++            } else {
++                if node.flags & FLAG_RIGHT_LEAF != 0 {
++                    return self.leaf_output(node.right as usize, fvals);
++                }
++                idx = node.right as usize;
++            }
++        }
++    }
++}
++
++#[derive(Debug)]
++pub struct LgbmEnsemble {
++    trees: Box<[LgbmTree]>,
++    max_feature_idx: usize,
++    average_output: bool,
++}
++
++impl LgbmEnsemble {
++    pub fn n_features(&self) -> usize {
++        if self.max_feature_idx > 0 {
++            self.max_feature_idx + 1
++        } else {
++            0
++        }
++    }
++
++    pub fn n_trees(&self) -> usize {
++        self.trees.len()
++    }
++
++    pub fn predict_single(&self, features: &[f64]) -> f64 {
++        if self.trees.is_empty() {
++            return 0.0;
++        }
++        let coef = if self.average_output {
++            1.0 / (self.trees.len() as f64)
++        } else {
++            1.0
++        };
++        let mut sum = 0.0f64;
++        for tree in &self.trees {
++            sum += tree.predict(features) * coef;
++        }
++        sum
++    }
++}
++
++#[derive(Clone, Debug)]
++enum Scaler {
++    Standard {
++        indices: Box<[usize]>,
++        mean: Box<[f64]>,
++        scale: Box<[f64]>,
++    },
++    Robust {
++        indices: Box<[usize]>,
++        center: Box<[f64]>,
++        scale: Box<[f64]>,
++    },
++}
++
++#[derive(Clone, Debug)]
++struct FeatureTransforms {
++    enabled: bool,
++    compatible: bool,
++    scalers: Box<[Scaler]>,
++}
++
++impl FeatureTransforms {
++    fn disabled() -> Self {
++        FeatureTransforms {
++            enabled: false,
++            compatible: true,
++            scalers: Box::new([]),
++        }
++    }
++
++    fn apply(&self, features: &mut [f64]) {
++        if !self.enabled {
++            return;
++        }
++        for scaler in &self.scalers {
++            match scaler {
++                Scaler::Standard {
++                    indices,
++                    mean,
++                    scale,
++                } => {
++                    for ((&idx, &m), &s) in indices.iter().zip(mean.iter()).zip(scale.iter()) {
++                        if let Some(slot) = features.get_mut(idx)
++                            && s != 0.0
++                        {
++                            *slot = (*slot - m) / s;
++                        }
++                    }
++                }
++                Scaler::Robust {
++                    indices,
++                    center,
++                    scale,
++                } => {
++                    for ((&idx, &c), &s) in indices.iter().zip(center.iter()).zip(scale.iter()) {
++                        if let Some(slot) = features.get_mut(idx)
++                            && s != 0.0
++                        {
++                            *slot = (*slot - c) / s;
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++#[derive(Debug)]
++pub struct WeightModel {
++    ensemble: LgbmEnsemble,
++    transforms: FeatureTransforms,
++}
++
++impl WeightModel {
++    pub fn load_from_file(path: &Path) -> io::Result<Self> {
++        let mut file = File::open(path)?;
++        let transforms = load_transforms_tail(&mut file).unwrap_or_else(|_| FeatureTransforms::disabled());
++        file.seek(SeekFrom::Start(0))?;
++        let ensemble = parse_ensemble(BufReader::new(file))?;
++        Ok(WeightModel {
++            ensemble,
++            transforms,
++        })
++    }
++
++    pub fn load_from_bytes(bytes: &[u8]) -> io::Result<Self> {
++        let tail_start = bytes.len().saturating_sub(16384);
++        let tail = String::from_utf8_lossy(bytes.get(tail_start..).unwrap_or(bytes));
++        let transforms = parse_transforms_tail(&tail).unwrap_or_else(|_| FeatureTransforms::disabled());
++        let ensemble = parse_ensemble(BufReader::new(bytes))?;
++        Ok(WeightModel {
++            ensemble,
++            transforms,
++        })
++    }
++
++    pub fn n_trees(&self) -> usize {
++        self.ensemble.n_trees()
++    }
++
++    pub fn n_features(&self) -> usize {
++        self.ensemble.n_features()
++    }
++
++    /// Predicts the quality weight for `input` scaled by `priority_factor`.
++    /// Returns `(weight, used_model)`. Falls back to `calculate_weight` if the
++    /// model returns a non-positive or NaN value, or if transforms are incompatible.
++    pub fn predict_weight(&self, input: &ModelInput, priority_factor: f64) -> (f64, bool) {
++        let total = input.success + input.failure;
++        if total < DEFAULT_MIN_SAMPLE_COUNT {
++            return (0.0, false);
++        }
++        if !self.transforms.compatible {
++            return calculate_weight(input, priority_factor);
++        }
++        let mut features = prepare_features(input);
++        let needed = self.ensemble.n_features();
++        if needed > features.len() && needed <= MAX_MODEL_FEATURE_SLOTS {
++            features.resize(needed, 0.0);
++        }
++        self.transforms.apply(&mut features);
++        let pred = self.ensemble.predict_single(&features);
++        if !pred.is_finite() || pred <= 0.0 {
++            return calculate_weight(input, priority_factor);
++        }
++        (pred * priority_factor, true)
++    }
++}
++
++fn parse_err(msg: impl Into<String>) -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, msg.into())
++}
++
++fn parse_u32_list(s: &str) -> io::Result<Vec<u32>> {
++    s.split_whitespace()
++        .map(|tok| tok.parse::<u32>().map_err(|e| parse_err(e.to_string())))
++        .collect()
++}
++
++fn parse_i32_list(s: &str) -> io::Result<Vec<i32>> {
++    s.split_whitespace()
++        .map(|tok| tok.parse::<i32>().map_err(|e| parse_err(e.to_string())))
++        .collect()
++}
++
++fn parse_f64_list(s: &str) -> io::Result<Vec<f64>> {
++    s.split_whitespace()
++        .map(|tok| tok.parse::<f64>().map_err(|e| parse_err(e.to_string())))
++        .collect()
++}
++
++fn read_section<R: BufRead>(
++    reader: &mut R,
++    buf: &mut String,
++) -> io::Result<Option<HashMap<String, String>>> {
++    let mut map = HashMap::new();
++    let mut saw_any = false;
++    loop {
++        buf.clear();
++        let n = reader.read_line(buf)?;
++        if n == 0 {
++            break;
++        }
++        let line = buf.trim();
++        if line.is_empty() {
++            if saw_any {
++                break;
++            }
++            continue;
++        }
++        if line.starts_with('[') || line.starts_with("end of trees") || line.starts_with("feature_importances") || line.starts_with("parameters:") {
++            if saw_any {
++                break;
++            }
++            return Ok(None);
++        }
++        saw_any = true;
++        if let Some((k, v)) = line.split_once('=') {
++            // Only keep keys needed for header or tree inference to keep peak RAM low.
++            match k {
++                "version"
++                | "num_class"
++                | "num_tree_per_iteration"
++                | "max_feature_idx"
++                | "average_output"
++                | "Tree"
++                | "num_leaves"
++                | "num_cat"
++                | "split_feature"
++                | "threshold"
++                | "decision_type"
++                | "left_child"
++                | "right_child"
++                | "leaf_value"
++                | "cat_boundaries"
++                | "cat_threshold"
++                | "is_linear"
++                | "leaf_const"
++                | "num_features"
++                | "leaf_features"
++                | "leaf_coeff" => {
++                    map.insert(k.to_string(), v.to_string());
++                }
++                _ => {}
++            }
++        }
++    }
++    if saw_any { Ok(Some(map)) } else { Ok(None) }
++}
++
++fn parse_ensemble<R: BufRead>(mut reader: R) -> io::Result<LgbmEnsemble> {
++    let mut buf = String::with_capacity(4096);
++    // First non-empty line must be "tree".
++    loop {
++        buf.clear();
++        if reader.read_line(&mut buf)? == 0 {
++            return Err(parse_err("empty LightGBM model file"));
++        }
++        let line = buf.trim();
++        if !line.is_empty() {
++            if line != "tree" {
++                return Err(parse_err(format!("unexpected LightGBM header: {line}")));
++            }
++            break;
++        }
++    }
++
++    let header = read_section(&mut reader, &mut buf)?
++        .ok_or_else(|| parse_err("missing LightGBM header section"))?;
++    let num_class: usize = header
++        .get("num_class")
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(1);
++    if num_class != 1 {
++        return Err(parse_err(format!(
++            "unsupported LightGBM num_class={num_class} (expected 1)"
++        )));
++    }
++    let max_feature_idx: usize = header
++        .get("max_feature_idx")
++        .ok_or_else(|| parse_err("missing max_feature_idx"))?
++        .parse()
++        .map_err(|_| parse_err("invalid max_feature_idx"))?;
++    let average_output = header
++        .get("average_output")
++        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
++
++    let mut trees = Vec::new();
++    while let Some(section) = read_section(&mut reader, &mut buf)? {
++        if !section.contains_key("Tree") {
++            if section.contains_key("num_leaves") {
++                // fallback if Tree= line was skipped
++            } else {
++                break;
++            }
++        }
++        trees.push(parse_tree(&section)?);
++    }
++    if trees.is_empty() {
++        return Err(parse_err("LightGBM model contains no trees"));
++    }
++
++    Ok(LgbmEnsemble {
++        trees: trees.into_boxed_slice(),
++        max_feature_idx,
++        average_output,
++    })
++}
++
++fn convert_missing_flags(decision_type: u32) -> io::Result<u8> {
++    match (decision_type >> 2) & 3 {
++        0 => Ok(0),
++        1 => Ok(FLAG_MISSING_ZERO),
++        2 => Ok(FLAG_MISSING_NAN),
++        other => Err(parse_err(format!("unknown missing_type={other}"))),
++    }
++}
++
++fn parse_tree(params: &HashMap<String, String>) -> io::Result<LgbmTree> {
++    let num_leaves: usize = params
++        .get("num_leaves")
++        .ok_or_else(|| parse_err("tree missing num_leaves"))?
++        .parse()
++        .map_err(|_| parse_err("invalid num_leaves"))?;
++    if num_leaves == 0 {
++        return Err(parse_err("num_leaves == 0"));
++    }
++    let num_cat: usize = params
++        .get("num_cat")
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(0);
++    let leaf_values = parse_f64_list(
++        params
++            .get("leaf_value")
++            .ok_or_else(|| parse_err("tree missing leaf_value"))?,
++    )?;
++    if leaf_values.len() != num_leaves {
++        return Err(parse_err("leaf_value length != num_leaves"));
++    }
++
++    let is_linear = params.get("is_linear").is_some_and(|v| v == "1");
++    let linear_leaves = if is_linear {
++        let leaf_consts = parse_f64_list(
++            params
++                .get("leaf_const")
++                .ok_or_else(|| parse_err("linear tree missing leaf_const"))?,
++        )?;
++        let num_features = parse_u32_list(
++            params
++                .get("num_features")
++                .ok_or_else(|| parse_err("linear tree missing num_features"))?,
++        )?;
++        if leaf_consts.len() != num_leaves || num_features.len() != num_leaves {
++            return Err(parse_err("linear tree metadata length mismatch"));
++        }
++        let total: usize = num_features.iter().map(|&n| n as usize).sum();
++        let all_feats = if total > 0 {
++            parse_u32_list(
++                params
++                    .get("leaf_features")
++                    .ok_or_else(|| parse_err("linear tree missing leaf_features"))?,
++            )?
++        } else {
++            Vec::new()
++        };
++        let all_coeffs = if total > 0 {
++            parse_f64_list(
++                params
++                    .get("leaf_coeff")
++                    .ok_or_else(|| parse_err("linear tree missing leaf_coeff"))?,
++            )?
++        } else {
++            Vec::new()
++        };
++        let mut leaves = Vec::with_capacity(num_leaves);
++        let mut off = 0usize;
++        for (&constant, &nf_u32) in leaf_consts.iter().zip(num_features.iter()) {
++            let nf = nf_u32 as usize;
++            let feat_slice = all_feats
++                .get(off..off + nf)
++                .ok_or_else(|| parse_err("linear leaf_features out of bounds"))?;
++            let coeff_slice = all_coeffs
++                .get(off..off + nf)
++                .ok_or_else(|| parse_err("linear leaf_coeff out of bounds"))?;
++            let feats: Box<[u16]> = feat_slice
++                .iter()
++                .map(|&f| u16::try_from(f).unwrap_or(u16::MAX))
++                .collect();
++            let coeffs: Box<[f64]> = coeff_slice.into();
++            off += nf;
++            leaves.push(LinearLeaf {
++                constant,
++                features: feats,
++                coeffs,
++            });
++        }
++        Some(leaves.into_boxed_slice())
++    } else {
++        None
++    };
++
++    if num_leaves == 1 {
++        return Ok(LgbmTree {
++            nodes: Box::new([]),
++            leaf_values: leaf_values.into_boxed_slice(),
++            cat_boundaries: Box::new([]),
++            cat_thresholds: Box::new([]),
++            linear_leaves,
++        });
++    }
++
++    let num_nodes = num_leaves - 1;
++    let left_child = parse_i32_list(
++        params
++            .get("left_child")
++            .ok_or_else(|| parse_err("tree missing left_child"))?,
++    )?;
++    let right_child = parse_i32_list(
++        params
++            .get("right_child")
++            .ok_or_else(|| parse_err("tree missing right_child"))?,
++    )?;
++    let decision_type = parse_u32_list(
++        params
++            .get("decision_type")
++            .ok_or_else(|| parse_err("tree missing decision_type"))?,
++    )?;
++    let split_feature = parse_u32_list(
++        params
++            .get("split_feature")
++            .ok_or_else(|| parse_err("tree missing split_feature"))?,
++    )?;
++    let threshold = parse_f64_list(
++        params
++            .get("threshold")
++            .ok_or_else(|| parse_err("tree missing threshold"))?,
++    )?;
++    if left_child.len() != num_nodes
++        || right_child.len() != num_nodes
++        || decision_type.len() != num_nodes
++        || split_feature.len() != num_nodes
++        || threshold.len() != num_nodes
++    {
++        return Err(parse_err("tree internal arrays length != num_leaves - 1"));
++    }
++
++    let raw_cat_thresholds = if num_cat > 0 {
++        parse_u32_list(
++            params
++                .get("cat_threshold")
++                .ok_or_else(|| parse_err("tree missing cat_threshold"))?,
++        )?
++    } else {
++        Vec::new()
++    };
++    let raw_cat_boundaries = if num_cat > 0 {
++        parse_u32_list(
++            params
++                .get("cat_boundaries")
++                .ok_or_else(|| parse_err("tree missing cat_boundaries"))?,
++        )?
++    } else {
++        Vec::new()
++    };
++
++    let mut cat_boundaries = if num_cat > 0 { vec![0u32] } else { Vec::new() };
++    let mut cat_thresholds = Vec::new();
++    let mut nodes = Vec::with_capacity(num_nodes);
++
++    for idx in 0..num_nodes {
++        let dt = *decision_type
++            .get(idx)
++            .ok_or_else(|| parse_err("decision_type out of range"))?;
++        let raw_feat = *split_feature
++            .get(idx)
++            .ok_or_else(|| parse_err("split_feature out of range"))?;
++        let raw_thresh = *threshold
++            .get(idx)
++            .ok_or_else(|| parse_err("threshold out of range"))?;
++        let raw_left = *left_child
++            .get(idx)
++            .ok_or_else(|| parse_err("left_child out of range"))?;
++        let raw_right = *right_child
++            .get(idx)
++            .ok_or_else(|| parse_err("right_child out of range"))?;
++        let mut flags = convert_missing_flags(dt)?;
++        let feat = u16::try_from(raw_feat)
++            .map_err(|_| parse_err("split_feature exceeds u16"))?;
++        let thresh = if dt & 1 != 0 {
++            flags |= FLAG_CATEGORICAL;
++            let cat_idx = raw_thresh as usize;
++            let start = *raw_cat_boundaries
++                .get(cat_idx)
++                .ok_or_else(|| parse_err("cat_boundaries out of range"))?
++                as usize;
++            let end = *raw_cat_boundaries
++                .get(cat_idx + 1)
++                .ok_or_else(|| parse_err("cat_boundaries end out of range"))?
++                as usize;
++            let slice = raw_cat_thresholds
++                .get(start..end)
++                .ok_or_else(|| parse_err("cat_threshold slice out of range"))?;
++            let n_bits: u32 = slice.iter().map(|w| w.count_ones()).sum();
++            if n_bits == 0 {
++                return Err(parse_err("empty categorical bitset"));
++            } else if n_bits == 1 {
++                let mut bit_pos = 0u32;
++                for (wi, &w) in slice.iter().enumerate() {
++                    if w != 0 {
++                        bit_pos = (wi as u32) * 32 + w.trailing_zeros();
++                        break;
++                    }
++                }
++                flags |= FLAG_CAT_ONE_HOT;
++                f64::from(bit_pos)
++            } else if let [single] = slice {
++                flags |= FLAG_CAT_SMALL;
++                f64::from(*single)
++            } else {
++                let new_idx = (cat_boundaries.len() - 1) as u32;
++                cat_thresholds.extend_from_slice(slice);
++                cat_boundaries.push(cat_thresholds.len() as u32);
++                f64::from(new_idx)
++            }
++        } else {
++            if dt & (1 << 1) != 0 {
++                flags |= FLAG_DEFAULT_LEFT;
++            }
++            raw_thresh
++        };
++
++        let left = if raw_left < 0 {
++            flags |= FLAG_LEFT_LEAF;
++            (!raw_left) as u32
++        } else {
++            raw_left as u32
++        };
++        let right = if raw_right < 0 {
++            flags |= FLAG_RIGHT_LEAF;
++            (!raw_right) as u32
++        } else {
++            raw_right as u32
++        };
++        nodes.push(LgbmNode {
++            threshold: thresh,
++            left,
++            right,
++            feature: feat,
++            flags,
++        });
++    }
++
++    Ok(LgbmTree {
++        nodes: nodes.into_boxed_slice(),
++        leaf_values: leaf_values.into_boxed_slice(),
++        cat_boundaries: cat_boundaries.into_boxed_slice(),
++        cat_thresholds: cat_thresholds.into_boxed_slice(),
++        linear_leaves,
++    })
++}
++
++fn load_transforms_tail(file: &mut File) -> io::Result<FeatureTransforms> {
++    let len = file.metadata()?.len();
++    let read_size = len.min(16384);
++    file.seek(SeekFrom::End(-(read_size as i64)))?;
++    let mut buf = vec![0u8; read_size as usize];
++    file.read_exact(&mut buf)?;
++    let tail = String::from_utf8_lossy(&buf);
++    parse_transforms_tail(&tail)
++}
++
++fn parse_transforms_tail(tail: &str) -> io::Result<FeatureTransforms> {
++    let Some(start) = tail.find("[transforms]") else {
++        return Ok(FeatureTransforms::disabled());
++    };
++    let Some(after) = tail.get(start + "[transforms]".len()..) else {
++        return Ok(FeatureTransforms::disabled());
++    };
++    let Some(end) = after.find("[/transforms]") else {
++        return Err(parse_err("missing [/transforms]"));
++    };
++    let Some(content) = after.get(..end) else {
++        return Err(parse_err("invalid [/transforms] span"));
++    };
++
++    let mut section = "";
++    let mut enabled = false;
++    let mut order: HashMap<usize, String> = HashMap::new();
++    let mut defs: HashMap<String, HashMap<String, String>> = HashMap::new();
++
++    for raw in content.lines() {
++        let line = raw.trim();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
++            section = if name.starts_with('/') { "" } else { name };
++            continue;
++        }
++        let Some((key, val)) = line.split_once('=') else {
++            continue;
++        };
++        let key = key.trim();
++        let val = val.trim();
++        match section {
++            "order" => {
++                if let Ok(idx) = key.parse::<usize>()
++                    && idx < MAX_FEATURE_SIZE
++                {
++                    order.insert(idx, val.to_string());
++                }
++            }
++            "definitions" => {
++                if let Some((id, param)) = key.split_once('_') {
++                    defs.entry(id.to_string())
++                        .or_default()
++                        .insert(param.to_string(), val.to_string());
++                }
++            }
++            _ => {
++                if key == "transform" {
++                    enabled = val == "true";
++                }
++            }
++        }
++    }
++
++    if order.is_empty() {
++        for (i, name) in DEFAULT_FEATURE_ORDER.iter().enumerate() {
++            order.insert(i, (*name).to_string());
++        }
++    } else if order.len() != MAX_FEATURE_SIZE {
++        for (i, name) in DEFAULT_FEATURE_ORDER.iter().enumerate() {
++            order.entry(i).or_insert_with(|| (*name).to_string());
++        }
++    }
++
++    let compatible = !enabled
++        || (order.len() == MAX_FEATURE_SIZE
++            && DEFAULT_FEATURE_ORDER
++                .iter()
++                .enumerate()
++                .all(|(i, expected)| order.get(&i).is_some_and(|actual| actual == expected)));
++
++    let mut scalers = Vec::new();
++    for params in defs.values() {
++        let Some(kind) = params.get("type") else {
++            continue;
++        };
++        let Some(feat_str) = params.get("features") else {
++            continue;
++        };
++        let indices: Vec<usize> = feat_str
++            .split(',')
++            .filter_map(|s| s.trim().parse::<usize>().ok())
++            .collect();
++        if indices.is_empty() || indices.iter().any(|&i| i >= MAX_FEATURE_SIZE) {
++            continue;
++        }
++        match kind.as_str() {
++            "StandardScaler" => {
++                let Some(mean) = params.get("mean").and_then(|s| parse_csv_f64(s)) else {
++                    continue;
++                };
++                let Some(scale) = params.get("scale").and_then(|s| parse_csv_f64(s)) else {
++                    continue;
++                };
++                if mean.len() == indices.len()
++                    && scale.len() == indices.len()
++                    && scale.iter().all(|&s| s != 0.0)
++                {
++                    scalers.push(Scaler::Standard {
++                        indices: indices.into_boxed_slice(),
++                        mean: mean.into_boxed_slice(),
++                        scale: scale.into_boxed_slice(),
++                    });
++                }
++            }
++            "RobustScaler" => {
++                let Some(center) = params.get("center").and_then(|s| parse_csv_f64(s)) else {
++                    continue;
++                };
++                let Some(scale) = params.get("scale").and_then(|s| parse_csv_f64(s)) else {
++                    continue;
++                };
++                if center.len() == indices.len()
++                    && scale.len() == indices.len()
++                    && scale.iter().all(|&s| s != 0.0)
++                {
++                    scalers.push(Scaler::Robust {
++                        indices: indices.into_boxed_slice(),
++                        center: center.into_boxed_slice(),
++                        scale: scale.into_boxed_slice(),
++                    });
++                }
++            }
++            _ => {}
++        }
++    }
++
++    Ok(FeatureTransforms {
++        enabled,
++        compatible,
++        scalers: scalers.into_boxed_slice(),
++    })
++}
++
++fn parse_csv_f64(s: &str) -> Option<Vec<f64>> {
++    if s.is_empty() {
++        return Some(Vec::new());
++    }
++    s.split(',')
++        .map(|part| part.trim().parse::<f64>().ok())
++        .collect()
++}
++
++fn now_unix_secs() -> i64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_or(0, |d| d.as_secs() as i64)
++}
++
++fn hash_string_to_float(s: &str, buckets: u32) -> f64 {
++    if s.is_empty() || buckets == 0 {
++        return 0.0;
++    }
++    let mut hash: u32 = 2166136261;
++    for &b in s.as_bytes() {
++        hash ^= u32::from(b);
++        hash = hash.wrapping_mul(16777619);
++    }
++    f64::from((hash % buckets) + 1)
++}
++
++pub fn prepare_features(input: &ModelInput) -> Vec<f64> {
++    prepare_features_at(input, now_unix_secs())
++}
++
++pub fn prepare_features_at(input: &ModelInput, now_unix: i64) -> Vec<f64> {
++    let mut features = Vec::with_capacity(MAX_FEATURE_SIZE);
++
++    let upload_mb = input.upload_mb.max(0.0);
++    let download_mb = input.download_mb.max(0.0);
++    let max_upload_rate_kb = input.max_upload_rate_kb.max(0.0);
++    let max_download_rate_kb = input.max_download_rate_kb.max(0.0);
++    let duration_minutes = input.duration_minutes.max(0.0);
++    let last_used_seconds = if input.last_used_unix > 0 {
++        (now_unix - input.last_used_unix).max(0) as f64
++    } else {
++        0.0
++    };
++
++    features.push(input.success as f64);
++    features.push(input.failure as f64);
++    features.push((input.connect_time_ms.max(0) as f64).ln_1p());
++    features.push((input.latency_ms.max(0) as f64).ln_1p());
++    features.push(upload_mb.ln_1p());
++    features.push(input.history_upload_mb.max(0.0).ln_1p());
++    features.push(max_upload_rate_kb.ln_1p());
++    features.push(input.history_max_upload_rate_kb.max(0.0).ln_1p());
++    features.push(download_mb.ln_1p());
++    features.push(input.history_download_mb.max(0.0).ln_1p());
++    features.push(max_download_rate_kb.ln_1p());
++    features.push(input.history_max_download_rate_kb.max(0.0).ln_1p());
++    features.push(duration_minutes.ln_1p());
++    features.push(input.history_duration_minutes.max(0.0).ln_1p());
++    features.push(last_used_seconds.ln_1p());
++
++    features.push(if input.is_udp { 1.0 } else { 0.0 });
++    features.push(if input.is_tcp { 1.0 } else { 0.0 });
++    features.push(input.loss_rate);
++    features.push(input.cumul_loss_rate);
++
++    features.push(f64::from(extract_asn_feature(&input.dest_ip_asn)));
++    features.push(f64::from(extract_geoip_feature(&input.dest_geoip)));
++
++    let address_feature = if !input.host.is_empty() {
++        extract_domain_type_feature(&input.host)
++    } else if !input.dest_ip.is_empty() {
++        extract_ip_feature(&input.dest_ip)
++    } else {
++        0
++    };
++    features.push(f64::from(address_feature));
++
++    let port_feature = extract_port_feature(input.dest_port);
++    features.push(f64::from(port_feature));
++
++    let traffic_ratio = if upload_mb > 0.0 && download_mb > 0.0 {
++        if upload_mb > download_mb {
++            download_mb / upload_mb
++        } else {
++            -upload_mb / download_mb
++        }
++    } else {
++        0.0
++    };
++    features.push(traffic_ratio);
++
++    let traffic_density = if duration_minutes > 0.0 {
++        ((upload_mb + download_mb) / duration_minutes).ln_1p()
++    } else {
++        0.0
++    };
++    features.push(traffic_density);
++
++    let conn_type = derive_connection_type(input.dest_port, address_feature, port_feature);
++    features.push(f64::from(conn_type));
++
++    features.push(hash_string_to_float(&input.dest_ip_asn, 500));
++    features.push(hash_string_to_float(&input.host, 1000));
++    features.push(hash_string_to_float(&input.dest_ip, 10000));
++    features.push(hash_string_to_float(&input.dest_geoip, 200));
++
++    features.push(f64::from(extract_exit_region_feature(&input.exit_region)));
++    features.push(hash_string_to_float(&input.exit_asn, 500));
++
++    debug_assert_eq!(features.len(), MAX_FEATURE_SIZE);
++    features
++}
++
++const ASN_CATEGORIES: &[(&str, i32)] = &[
++    ("google", 100),
++    ("amazon", 101),
++    ("microsoft", 102),
++    ("facebook", 103),
++    ("apple", 104),
++    ("cloudflare", 105),
++    ("akamai", 106),
++    ("fastly", 107),
++    ("netflix", 108),
++    ("alibaba", 109),
++    ("tencent", 110),
++    ("baidu", 111),
++    ("huawei", 112),
++    ("bytedance", 113),
++    ("tiktok", 113),
++    ("xiaomi", 114),
++    ("salesforce", 115),
++    ("adobe", 116),
++    ("nvidia", 117),
++    ("chinatelecom", 120),
++    ("china telecom", 120),
++    ("chinanet", 120),
++    ("chinaunicom", 121),
++    ("china unicom", 121),
++    ("chinamobile", 122),
++    ("china mobile", 122),
++    ("cmnet", 122),
++    ("chinaedu", 123),
++    ("china education", 123),
++    ("cernet", 123),
++    ("cstnet", 124),
++    ("verizon", 140),
++    ("comcast", 141),
++    ("at&t", 142),
++    ("sprint", 143),
++    ("t-mobile", 144),
++    ("tmobile", 144),
++    ("level3", 145),
++    ("level 3", 145),
++    ("lumen", 145),
++    ("centurylink", 145),
++    ("ntt", 146),
++    ("kddi", 147),
++    ("softbank", 148),
++    ("telstra", 149),
++    ("singtel", 150),
++    ("starhub", 151),
++    ("m1", 152),
++    ("pccw", 153),
++    ("hkbn", 154),
++    ("smartone", 155),
++    ("hgc", 156),
++    ("cht", 157),
++    ("chunghwa", 157),
++    ("hinet", 157),
++    ("fetnet", 158),
++    ("far eastone", 158),
++    ("twm", 159),
++    ("taiwan mobile", 159),
++    ("hkt", 160),
++    ("deutsche telekom", 161),
++    ("vodafone", 162),
++    ("telefonica", 163),
++    ("optus", 164),
++    ("bell canada", 165),
++    ("rogers communications", 166),
++    ("telus", 167),
++    ("rakuten", 168),
++    ("korea telecom", 169),
++    ("viettel", 170),
++    ("pldt", 171),
++    ("sk broadband", 172),
++    ("charter communications", 173),
++    ("cdn77", 180),
++    ("limelight", 181),
++    ("edgecast", 182),
++    ("edgio", 182),
++    ("stackpath", 183),
++    ("imperva", 184),
++    ("oracle", 185),
++    ("ibm", 186),
++    ("digitalocean", 187),
++    ("linode", 188),
++    ("ovh", 189),
++    ("hetzner", 190),
++    ("vultr", 191),
++    ("cogent", 192),
++    ("leaseweb", 193),
++    ("upyun", 194),
++    ("qingcloud", 195),
++    ("ucloud", 196),
++    ("contabo", 197),
++    ("rackspace", 198),
++    ("bunnyway", 199),
++    ("bunnycdn", 199),
++    ("netactuate", 200),
++    ("wangsu", 201),
++    ("kingsoft", 202),
++    ("scaleway", 203),
++    ("ionos", 204),
++    ("twitter", 220),
++    ("twitch", 221),
++    ("discord", 222),
++    ("spotify", 223),
++    ("github", 224),
++    ("steam", 225),
++    ("blizzard", 226),
++    ("riotgames", 227),
++    ("riot games", 227),
++    ("epicgames", 228),
++    ("electronic arts", 229),
++    ("valve", 230),
++    ("mozilla", 231),
++    ("reddit", 232),
++    ("openai", 233),
++    ("bilibili", 234),
++    ("cern", 240),
++    ("stanford", 241),
++    ("tsinghua", 242),
++    ("pku", 243),
++    ("visa", 250),
++    ("mastercard", 251),
++    ("paypal", 252),
++    ("stripe", 253),
++    ("alipay", 254),
++    ("wechatpay", 255),
++    ("unionpay", 256),
++    ("hkix", 260),
++    ("linx", 261),
++    ("jpix", 262),
++    ("equinix", 263),
++    ("sgix", 264),
++    ("de-cix", 265),
++    ("ams-ix", 266),
++];
++
++fn extract_asn_feature(asn_info: &str) -> i32 {
++    if asn_info.is_empty() {
++        return 0;
++    }
++    let lower = asn_info.to_ascii_lowercase();
++    for &(kw, cat) in ASN_CATEGORIES {
++        if lower.contains(kw) {
++            return cat;
++        }
++    }
++    let s = lower.strip_prefix("as").unwrap_or(&lower);
++    let digits = s
++        .as_bytes()
++        .iter()
++        .take_while(|b| b.is_ascii_digit())
++        .count();
++    if let Some(prefix) = s.get(..digits)
++        && digits > 0
++        && let Ok(num) = prefix.parse::<u64>()
++    {
++        return if num < 1000 {
++            1
++        } else if num < 10000 {
++            2
++        } else if num < 50000 {
++            3
++        } else if num < 150000 {
++            4
++        } else {
++            5
++        };
++    }
++    0
++}
++
++fn geo_category(code: &str) -> Option<i32> {
++    Some(match code {
++        "CN" => 100, "HK" => 101, "TW" => 102, "JP" => 103, "KR" => 104,
++        "SG" => 105, "US" => 106, "CA" => 107, "GB" => 108, "DE" => 109,
++        "FR" => 110, "RU" => 111, "AU" => 112, "IN" => 113, "BR" => 114,
++        "IT" => 115, "ES" => 116, "NL" => 117, "SE" => 118, "CH" => 119,
++        "PL" => 120, "TR" => 121, "MX" => 122, "ZA" => 123, "AR" => 124,
++        "ID" => 125, "TH" => 126, "VN" => 127, "PH" => 128, "MY" => 129,
++        "MO" => 130, "AE" => 131, "AT" => 132, "BD" => 133, "BE" => 134,
++        "CL" => 135, "CO" => 136, "CZ" => 137, "DK" => 138, "EG" => 139,
++        "FI" => 140, "GR" => 141, "IE" => 142, "IL" => 143, "IS" => 144,
++        "KE" => 145, "KH" => 146, "KZ" => 147, "LK" => 148, "LU" => 149,
++        "MA" => 150, "MM" => 151, "NG" => 152, "NO" => 153, "NZ" => 154,
++        "PE" => 155, "PK" => 156, "PT" => 157, "RO" => 158, "SA" => 159,
++        "UA" => 160,
++        _ => return None,
++    })
++}
++
++fn extract_geoip_feature(country: &str) -> i32 {
++    if country.is_empty() {
++        return 0;
++    }
++    if let Some(cat) = geo_category(country) {
++        return cat;
++    }
++    let mut hash: i64 = 0;
++    for ch in country.chars() {
++        hash = hash.wrapping_mul(31).wrapping_add(ch as i64);
++    }
++    1 + (hash % 20) as i32
++}
++
++fn extract_exit_region_feature(region: &str) -> i32 {
++    if region.is_empty() {
++        return 0;
++    }
++    let upper = region.to_ascii_uppercase();
++    extract_geoip_feature(&upper)
++}
++
++const DNS_KEYWORDS: &[&str] = &[
++    "8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112",
++    "208.67.222.222", "208.67.220.220", "dns.google", "dns.google.com",
++    "cloudflare-dns.com", "dns.cloudflare.com", "one.one.one.one",
++    "family.cloudflare-dns.com", "security.cloudflare-dns.com",
++    "dns.quad9.net", "dns9.quad9.net", "dns10.quad9.net", "dns11.quad9.net",
++    "doh.opendns.com", "doh.familyshield.opendns.com", "doh.sandbox.opendns.com",
++    "mozilla.cloudflare-dns.com", "firefox.dns.nextdns.io", "nextdns.io",
++    "dns.adguard.com", "dns-family.adguard.com", "dns-unfiltered.adguard.com",
++    "doh.cleanbrowsing.org", "family-filter-dns.cleanbrowsing.org",
++    "dot.cloudflare-dns.com", "dot.alidns.com", "dot.dns.sb", "dot.360.cn",
++    "doh.pub", "dns.pub", "doh.360.cn", "dns.alidns.com", "doh.alidns.com",
++    "doh.dns.sb", "rubyfish.cn", "dns.rubyfish.cn", "pdns.fkgfw.cf",
++    "commons.host", "odvr.nic.cz", "doh.libredns.gr", "dns.digitale-gesellschaft.ch",
++    "dns.switch.ch", "jp.tiar.app", "jp.tiarap.org", "kaitain.restena.lu",
++    "dns.twnic.tw", "dns.hinet.net", "dns", "doh", "doq", "dot", "resolver",
++    "nameserver", "recursive", "authoritative", "secure-dns", "private-dns",
++];
++
++const API_KEYWORDS: &[&str] = &[
++    "api.cloudflare.com", "api.amazonaws.com", "api.azure.com", "googleapis.com",
++    "api.fastly.com", "api.maxcdn.com", "api.keycdn.com", "api.bunnycdn.com",
++    "api.digitalocean.com", "api.vultr.com", "api.linode.com", "api.hetzner.com",
++    "amazonaws.com", "api.vercel.com", "api.netlify.com", "api.heroku.com",
++    "api.railway.app", "api.render.com", "api.fly.io", "registry.npmjs.org",
++    "pypi.org", "hub.docker.com", "registry.docker.io", "rubygems.org", "crates.io",
++    "api.datadog.com", "api.newrelic.com", "api.segment.com", "api.mixpanel.com",
++    "api.amplitude.com", "api.hotjar.com", "api.sentry.io", "api.rollbar.com",
++    "api.auth0.com", "api.okta.com", "api.twilio.com", "api.sendgrid.com",
++    "api.mailgun.com", "api.stripe.com", "ecs.aliyuncs.com", "api.qcloud.com",
++    "api.ucloud.cn", "api.huaweicloud.com", "api.baidubce.com", "api.volcengine.com",
++    "gateway.", "api-gateway.", "apigateway.", "/api/", "/v1/", "/v2/", "/v3/",
++    "/v4/", "/rest/", "/graphql/", "rest.", "graphql.", "webhook.", "rpc.",
++];
++
++const GAME_KEYWORDS: &[&str] = &[
++    "game", "play.google", "steam", "xbox", "playstation", "nintendo", "ea.com",
++    "riotcdn", "blizzard", "ubisoft", "epic", "cod.", "callofduty", "minecraft",
++    "roblox", "pubg", "fortnite", "valorant", "riotgames", "leagueoflegends",
++    "warzone", "apex", "apexlegends", "overwatch", "dota", "csgo",
++    "counterstrike", "hearthstone", "battlenet", "battle.net", "genshin",
++    "mihoyo", "hoyoverse", "lol", "arenaofvalor", "honorofkings",
++];
++
++const COMM_KEYWORDS: &[&str] = &[
++    "meet", "zoom", "teams", "voip", "sip", "call", "chat", "conference", "webex",
++    "discord", "slack", "telegram", "signal", "whatsapp", "skype", "wechat",
++    "voicechat", "videocall", "rtc", "webrtc", "jitsi", "mumble", "ventrilo",
++    "teamspeak", "discord.gg", "meeting", "huddle", "gather", "qq", "msn", "icq",
++    "line.me", "linecorp", "line-apps", "line-scdn", "kakao", "viber", "imo.im",
++    "element.io",
++];
++
++const STREAMING_KEYWORDS: &[&str] = &[
++    "youtube", "netflix", "hulu", "spotify", "tiktok", "douyin", "youku", "iqiyi",
++    "bilibili", "twitch", "hbo", "disney", "vimeo", "vod", "stream", "video",
++    "media", "movie", "tv", "music", "audio", "cdm", "cdn", "content", "live",
++    "livestream", "replay", "shorts", "kuaishou", "huya", "douyu", "googlevideo",
++    "ytimg", "primevideo", "hotstar", "wetv", "kugou", "acfun",
++];
++
++fn looks_like_domain(host: &str) -> bool {
++    let mut parts = host.split('.');
++    let mut count = 0usize;
++    for part in &mut parts {
++        if part.is_empty()
++            || !part
++                .bytes()
++                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
++        {
++            return false;
++        }
++        count += 1;
++    }
++    count >= 2
++}
++
++fn extract_domain_type_feature(host: &str) -> i32 {
++    if host.is_empty() {
++        return 0;
++    }
++    let lower = host.to_ascii_lowercase();
++    if lower.contains('[') || lower.parse::<IpAddr>().is_ok() {
++        return 1;
++    }
++    for (list, cat) in [
++        (DNS_KEYWORDS, 104),
++        (API_KEYWORDS, 103),
++        (GAME_KEYWORDS, 101),
++        (COMM_KEYWORDS, 102),
++        (STREAMING_KEYWORDS, 100),
++    ] {
++        for &kw in list {
++            if lower.contains(kw) {
++                return cat;
++            }
++        }
++    }
++    if lower.ends_with(".gov") {
++        return 114;
++    }
++    if lower.ends_with(".edu") {
++        return 115;
++    }
++    if lower.ends_with(".cn") {
++        return 110;
++    }
++    if lower.ends_with(".com") {
++        return 111;
++    }
++    if lower.ends_with(".net") {
++        return 112;
++    }
++    if lower.ends_with(".org") {
++        return 113;
++    }
++    if looks_like_domain(&lower) {
++        if lower.bytes().filter(|&b| b == b'.').count() >= 2 {
++            return 2;
++        }
++        return 3;
++    }
++    0
++}
++
++fn extract_ip_feature(ip_str: &str) -> i32 {
++    let Ok(addr) = ip_str.parse::<IpAddr>() else {
++        return 0;
++    };
++    match addr {
++        IpAddr::V4(v4) => {
++            let [a, b, c, _] = v4.octets();
++            if a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) {
++                10
++            } else if a == 127 {
++                11
++            } else if a == 169 && b == 254 {
++                12
++            } else if (a == 100 && (64..=127).contains(&b))
++                || (a == 192 && b == 0 && c == 2)
++                || (a == 198 && b == 51 && c == 100)
++                || (a == 203 && b == 0 && c == 113)
++                || a >= 240
++            {
++                13
++            } else {
++                14
++            }
++        }
++        IpAddr::V6(v6) => {
++            if v6 == Ipv6Addr::LOCALHOST {
++                11
++            } else {
++                let [seg0, seg1, ..] = v6.segments();
++                if (seg0 & 0xffc0) == 0xfe80 {
++                    12
++                } else if (seg0 & 0xfe00) == 0xfc00 {
++                    10
++                } else if (seg0 == 0x2001 && seg1 == 0x0db8) || (seg0 & 0xff00) == 0xff00 {
++                    13
++                } else if let Some(v4) = v6.to_ipv4_mapped() {
++                    extract_ip_feature(&Ipv4Addr::from(v4.octets()).to_string())
++                } else {
++                    15
++                }
++            }
++        }
++    }
++}
++
++fn is_dns_port(port: u16) -> bool {
++    matches!(port, 53 | 784 | 853 | 5053 | 5353 | 5355 | 8853 | 9953)
++}
++
++fn is_api_port(port: u16) -> bool {
++    matches!(
++        port,
++        3000 | 3001 | 4000 | 4001 | 5000 | 5001 | 6000 | 6001 | 7000 | 7001 | 8000 | 8001 | 8080
++            | 8443 | 8888 | 9000 | 9001 | 9002
++    )
++}
++
++fn is_game_port(port: u16) -> bool {
++    matches!(
++        port,
++        3074 | 3478 | 3479 | 3659 | 3724 | 6112 | 6250 | 6881 | 7000..=7004 | 8393 | 8394 | 9000
++            | 9001 | 9330 | 9331 | 9339 | 14000..=14004 | 14008 | 16000 | 18000 | 18060 | 18120
++            | 18180 | 18240 | 18300 | 19000 | 19132 | 20000..=20002 | 22100..=22102 | 25565
++            | 27015..=27020 | 27031 | 27036 | 30000..=30004 | 35000..=35002 | 40000..=40002
++            | 50000..=50002 | 50505 | 65010 | 65050
++    )
++}
++
++fn is_comm_port(port: u16) -> bool {
++    matches!(
++        port,
++        1080 | 1443 | 1720 | 1863 | 3478 | 3479 | 5060 | 5061 | 5222 | 5228 | 5269 | 5349 | 5350
++            | 5938 | 6881..=6889 | 8443 | 8801 | 8802 | 10000 | 10001 | 19302 | 19303
++            | 34784 | 50000..=50005 | 55000 | 55001
++    )
++}
++
++fn well_known_port_category(port: u16) -> Option<i32> {
++    Some(match port {
++        22 => 100,
++        25 => 101,
++        53 | 784 | 853 | 5053 | 5353 | 5355 | 8853 | 9953 => 102,
++        80 => 103,
++        110 => 104,
++        123 => 120,
++        143 => 105,
++        389 => 130,
++        443 => 106,
++        445 => 122,
++        465 => 107,
++        587 => 121,
++        636 => 131,
++        993 => 108,
++        995 => 109,
++        1194 => 110,
++        1433 => 124,
++        1521 => 125,
++        1812 => 111,
++        2049 => 126,
++        3306 => 112,
++        3389 => 123,
++        5432 => 113,
++        5672 => 128,
++        5900 => 127,
++        6379 => 114,
++        6660 | 6665..=6669 => 116,
++        8000 | 8008 | 8080 => 117,
++        8443 => 118,
++        8883 => 119,
++        9200 => 129,
++        11211 => 132,
++        27017 => 115,
++        _ => return None,
++    })
++}
++
++fn game_comm_range_category(port: u16) -> Option<i32> {
++    Some(match port {
++        3000..=3999 | 6000..=7000 | 8000..=9000 | 10000..=20000 | 50000..=55000 => 3,
++        5000..=5999 | 49000..=49999 | 55001..=60000 => 2,
++        27000..=28000 | 30000..=32000 => 1,
++        _ => return None,
++    })
++}
++
++fn extract_port_feature(port: u16) -> i32 {
++    if is_dns_port(port) {
++        return 7;
++    }
++    if is_api_port(port) {
++        return 6;
++    }
++    if is_game_port(port) {
++        return 1;
++    }
++    if is_comm_port(port) {
++        return 2;
++    }
++    if let Some(cat) = well_known_port_category(port) {
++        return cat;
++    }
++    if let Some(cat) = game_comm_range_category(port) {
++        return match cat {
++            1 => 3,
++            2 => 4,
++            _ => 5,
++        };
++    }
++    if port <= 1023 {
++        8
++    } else if port <= 49151 {
++        9
++    } else {
++        10
++    }
++}
++
++fn derive_connection_type(port: u16, address_feature: i32, port_feature: i32) -> i32 {
++    if address_feature == 104 || port_feature == 7 || is_dns_port(port) {
++        return 7;
++    }
++    if address_feature == 103 || port_feature == 6 || is_api_port(port) {
++        return 6;
++    }
++    if address_feature == 101 || address_feature == 102 || is_game_port(port) || is_comm_port(port) {
++        return 3;
++    }
++    if address_feature == 100 {
++        return 2;
++    }
++    if matches!(port, 80 | 443) || matches!(port_feature, 103 | 106) {
++        return 1;
++    }
++    if matches!(port_feature, 112..=115) {
++        return 4;
++    }
++    if matches!(port, 20 | 21 | 22 | 989 | 990) {
++        return 5;
++    }
++    if game_comm_range_category(port).is_some() || (port > 10000 && port < 65000) {
++        return 3;
++    }
++    0
++}
++
++#[derive(Clone, Copy)]
++struct SceneParams {
++    success_rate_weight: f64,
++    connect_time_weight: f64,
++    latency_weight: f64,
++    traffic_weight: f64,
++    duration_weight: f64,
++    quality_weight: f64,
++    loss_weight: f64,
++    min_decay_factor: f64,
++}
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Scene {
++    Web,
++    Interactive,
++    Streaming,
++    Transfer,
++}
++
++impl Scene {
++    fn params(self) -> SceneParams {
++        match self {
++            Scene::Web => SceneParams {
++                success_rate_weight: 0.5,
++                connect_time_weight: 0.1,
++                latency_weight: 0.4,
++                traffic_weight: 0.8,
++                duration_weight: 0.6,
++                quality_weight: 1.0,
++                loss_weight: 0.3,
++                min_decay_factor: 0.2,
++            },
++            Scene::Interactive => SceneParams {
++                success_rate_weight: 0.6,
++                connect_time_weight: 0.1,
++                latency_weight: 0.3,
++                traffic_weight: 1.2,
++                duration_weight: 1.0,
++                quality_weight: 1.3,
++                loss_weight: 0.5,
++                min_decay_factor: 0.3,
++            },
++            Scene::Streaming => SceneParams {
++                success_rate_weight: 0.5,
++                connect_time_weight: 0.2,
++                latency_weight: 0.3,
++                traffic_weight: 1.5,
++                duration_weight: 0.8,
++                quality_weight: 1.2,
++                loss_weight: 0.8,
++                min_decay_factor: 0.2,
++            },
++            Scene::Transfer => SceneParams {
++                success_rate_weight: 0.5,
++                connect_time_weight: 0.2,
++                latency_weight: 0.3,
++                traffic_weight: 1.8,
++                duration_weight: 0.7,
++                quality_weight: 0.9,
++                loss_weight: 1.0,
++                min_decay_factor: 0.1,
++            },
++        }
++    }
++}
++
++fn identify_scene(
++    is_udp: bool,
++    latency: i64,
++    upload_mb: f64,
++    download_mb: f64,
++    max_upload_kb: f64,
++    max_download_kb: f64,
++    duration_min: f64,
++) -> Scene {
++    let total_rate = if duration_min > 0.0 {
++        (upload_mb + download_mb) / duration_min
++    } else {
++        0.0
++    };
++    if (is_udp
++        && latency < 150
++        && duration_min > 3.0
++        && upload_mb > 0.2
++        && download_mb > 0.2
++        && max_upload_kb > 200.0
++        && max_download_kb > 200.0
++        && total_rate > 0.1
++        && total_rate < 10.0)
++        || (!is_udp
++            && latency < 250
++            && duration_min > 3.0
++            && upload_mb > 0.1
++            && download_mb > 0.1
++            && upload_mb < 150.0
++            && download_mb < 150.0
++            && (upload_mb / download_mb) > 0.2
++            && (upload_mb / download_mb) < 5.0
++            && max_upload_kb > 150.0
++            && max_download_kb > 150.0
++            && total_rate > 0.05
++            && total_rate < 15.0)
++    {
++        return Scene::Interactive;
++    }
++    if (upload_mb > 100.0 || download_mb > 100.0 || max_upload_kb > 5000.0)
++        && duration_min > 0.5
++        && total_rate > 5.0
++    {
++        return Scene::Transfer;
++    }
++    if duration_min > 1.0 && upload_mb > 0.0 && max_upload_kb > 0.0 {
++        let dl_tp = download_mb / duration_min;
++        if (download_mb > 60.0
++            && download_mb / upload_mb > 3.0
++            && max_download_kb > 2000.0
++            && max_download_kb / max_upload_kb > 4.0
++            && dl_tp > 5.0)
++            || (download_mb > 15.0
++                && download_mb / upload_mb > 3.0
++                && max_download_kb > 1000.0
++                && max_download_kb / max_upload_kb > 3.0
++                && dl_tp > 2.0)
++        {
++            return Scene::Streaming;
++        }
++    }
++    Scene::Web
++}
++
++fn time_decay(last_used: i64, now: i64, min_decay: f64) -> f64 {
++    let fuzzy = (last_used / 3600) * 3600;
++    let hours = ((now - fuzzy).max(0) as f64) / 3600.0;
++    let decay = if hours <= 24.0 {
++        1.0
++    } else if hours <= 72.0 {
++        1.0 - (hours - 24.0) / 48.0 * 0.2
++    } else if hours <= 168.0 {
++        0.8 - (hours - 72.0) / 96.0 * 0.3
++    } else if hours <= 720.0 {
++        0.5 - (hours - 168.0) / 552.0 * 0.2
++    } else {
++        0.1
++    };
++    decay.max(min_decay)
++}
++
++fn traffic_factor(
++    traffic_mb: f64,
++    max_rate_kb: f64,
++    duration_min: f64,
++    hist_max_rate_kb: f64,
++    hist_total_mb: f64,
++    hist_duration_min: f64,
++    is_short: bool,
++) -> f64 {
++    if traffic_mb <= 0.0 || duration_min <= 0.0 {
++        return 0.0;
++    }
++    let base = if traffic_mb < 0.005 {
++        0.10 + 0.05 * (traffic_mb / 0.001).log10()
++    } else if traffic_mb < 0.01 {
++        0.18 + 0.08 * (traffic_mb / 0.005).log10()
++    } else if traffic_mb < 0.05 {
++        0.35 + 0.10 * (traffic_mb / 0.01).log10()
++    } else if traffic_mb < 0.1 {
++        0.53 + 0.15 * (traffic_mb / 0.05).log10()
++    } else if traffic_mb < 0.5 {
++        0.72 + 0.18 * (traffic_mb / 0.1).log10()
++    } else if traffic_mb < 1.0 {
++        0.98 + 0.15 * (traffic_mb / 0.5).log10()
++    } else if traffic_mb < 5.0 {
++        1.18 + 0.10 * traffic_mb.log10()
++    } else if traffic_mb < 20.0 {
++        1.32 + 0.08 * (traffic_mb / 5.0).log10()
++    } else if traffic_mb < 100.0 {
++        1.45 + 0.06 * (traffic_mb / 20.0).log10()
++    } else if traffic_mb < 500.0 {
++        1.56 + 0.05 * (traffic_mb / 100.0).log10()
++    } else if traffic_mb < 3000.0 {
++        1.66 + 0.04 * (traffic_mb / 500.0).log10()
++    } else {
++        1.74 + 0.02 * (traffic_mb / 3000.0).log10()
++    };
++
++    let rate_bonus = if max_rate_kb < 20.0 {
++        1.0 + 0.05 * (max_rate_kb / 20.0)
++    } else if max_rate_kb < 100.0 {
++        1.05 + 0.05 * ((max_rate_kb - 20.0) / 80.0)
++    } else if max_rate_kb < 500.0 {
++        1.10 + 0.05 * ((max_rate_kb - 100.0) / 400.0)
++    } else if max_rate_kb < 2000.0 {
++        1.15 + 0.05 * ((max_rate_kb - 500.0) / 1500.0)
++    } else if max_rate_kb < 5000.0 {
++        1.20 + 0.04 * ((max_rate_kb - 2000.0) / 3000.0)
++    } else if max_rate_kb < 20000.0 {
++        1.24 + 0.04 * ((max_rate_kb - 5000.0) / 15000.0)
++    } else if max_rate_kb < 100000.0 {
++        (1.28 + 0.03 * (max_rate_kb / 20000.0).log10()).min(1.32)
++    } else {
++        (1.32 + 0.02 * (max_rate_kb / 100000.0).log10()).min(1.36)
++    };
++
++    let throughput_kbs = (traffic_mb * 1024.0) / (duration_min * 60.0).max(1.0);
++    let accel_bonus = if throughput_kbs > 0.0 {
++        let ratio = max_rate_kb / throughput_kbs;
++        if ratio > 2.0 {
++            1.0 + (0.02 * (ratio - 2.0)).min(0.12)
++        } else {
++            1.0
++        }
++    } else {
++        1.0
++    };
++
++    let history_penalty = if hist_max_rate_kb > 0.0 {
++        let r = max_rate_kb / hist_max_rate_kb;
++        if r < 0.5 {
++            0.6 + 0.4 * r
++        } else if r < 0.9 {
++            0.85 + 0.15 * r
++        } else if r > 1.2 {
++            1.0 + (0.02 * (r - 1.2)).min(0.05)
++        } else {
++            1.0
++        }
++    } else {
++        1.0
++    };
++
++    let mut combined = rate_bonus * accel_bonus * history_penalty;
++    if hist_max_rate_kb > 0.0 {
++        let history_ratio = max_rate_kb / hist_max_rate_kb;
++        let history_avg_kbs = if hist_total_mb > 0.0 && hist_duration_min > 0.0 {
++            (hist_total_mb * 1024.0) / (hist_duration_min * 60.0).max(1.0)
++        } else {
++            0.0
++        };
++        let low_tp = if history_avg_kbs > 0.0 {
++            throughput_kbs < 0.3 * history_avg_kbs
++        } else {
++            throughput_kbs < 10.0
++        };
++        if history_ratio < 0.1 && low_tp {
++            let evidence = if hist_duration_min > 0.0 && duration_min > 0.0 {
++                ((hist_duration_min / duration_min - 1.0) / 4.0).clamp(0.0, 1.0)
++            } else {
++                0.0
++            };
++            combined *= 1.0 - 0.5 * evidence;
++        }
++    }
++    combined = combined.min(1.25);
++
++    let tp = traffic_mb / duration_min.max(1.0);
++    let conn_factor = if is_short {
++        1.0 + 0.06 * (tp / 25.0).min(1.0)
++    } else if tp > 5.0 {
++        1.0 + 0.05 * ((tp - 5.0) / 80.0).min(1.0)
++    } else {
++        1.0
++    };
++
++    (base * combined * conn_factor).min(1.25)
++}
++
++/// Heuristic fallback matching `vernesong/mihomo`'s `smart.CalculateWeight`.
++pub fn calculate_weight(input: &ModelInput, priority_factor: f64) -> (f64, bool) {
++    let total = input.success + input.failure;
++    if total < DEFAULT_MIN_SAMPLE_COUNT {
++        return (0.0, false);
++    }
++
++    let scene = identify_scene(
++        input.is_udp,
++        input.latency_ms,
++        input.upload_mb,
++        input.download_mb,
++        input.max_upload_rate_kb,
++        input.max_download_rate_kb,
++        input.duration_minutes,
++    );
++    let mut params = scene.params();
++    let time_factor = if input.last_used_unix > 0 {
++        time_decay(input.last_used_unix, now_unix_secs(), params.min_decay_factor)
++    } else {
++        1.0
++    };
++
++    let mut decayed_s = (input.success as f64) * time_factor;
++    let mut decayed_f = (input.failure as f64) * time_factor;
++    let mut decayed_total = decayed_s + decayed_f;
++    if decayed_total < 1.0 {
++        decayed_s = decayed_s.max(0.5);
++        decayed_f = decayed_f.max(0.5);
++        decayed_total = decayed_s + decayed_f;
++    }
++
++    let connect_time = if input.connect_time_ms == 0 {
++        if input.connection_failed { 2000 } else { 1 }
++    } else {
++        input.connect_time_ms
++    };
++    let latency = if input.latency_ms == 0 {
++        if input.connection_failed { 2000 } else { 1 }
++    } else {
++        input.latency_ms
++    };
++
++    let success_rate = decayed_s / decayed_total;
++    let connect_score = ((-(connect_time as f64) / 1500.0).exp() * time_factor).clamp(0.3, 0.8);
++    let latency_score = ((-(latency as f64) / 1500.0).exp() * time_factor).clamp(0.3, 0.8);
++
++    if input.is_udp {
++        params.latency_weight = (params.latency_weight * 1.2).min(0.5);
++        params.success_rate_weight = (params.success_rate_weight * 1.1).min(0.6);
++        params.connect_time_weight = 1.0 - params.success_rate_weight - params.latency_weight;
++    }
++
++    let is_short = input.duration_minutes <= 1.0;
++    let is_long = input.duration_minutes > 10.0;
++    let base_weight = success_rate * params.success_rate_weight
++        + connect_score * params.connect_time_weight
++        + latency_score * params.latency_weight;
++
++    let tf = if input.upload_mb > 0.0 || input.download_mb > 0.0 {
++        let up = traffic_factor(
++            input.upload_mb,
++            input.max_upload_rate_kb,
++            input.duration_minutes,
++            input.history_max_upload_rate_kb,
++            input.history_upload_mb,
++            input.history_duration_minutes,
++            is_short,
++        );
++        let dl = traffic_factor(
++            input.download_mb,
++            input.max_download_rate_kb,
++            input.duration_minutes,
++            input.history_max_download_rate_kb,
++            input.history_download_mb,
++            input.history_duration_minutes,
++            is_short,
++        );
++        let (uw, dw) = if scene == Scene::Streaming {
++            (0.2, 0.8)
++        } else if scene == Scene::Transfer && input.upload_mb > input.download_mb * 2.0 {
++            (0.7, 0.3)
++        } else {
++            (0.4, 0.6)
++        };
++        up * uw + dl * dw
++    } else {
++        0.0
++    };
++
++    let duration_factor = if input.duration_minutes > 0.0 {
++        if is_short {
++            (0.1 + input.duration_minutes.ln_1p() * 0.08).min(0.3)
++        } else if is_long {
++            (0.2 + input.duration_minutes.ln_1p() * 0.1).min(0.5)
++        } else {
++            (0.15 + input.duration_minutes.ln_1p() * 0.09).min(0.4)
++        }
++    } else {
++        0.1
++    };
++
++    let mut quality_bonus = 0.0f64;
++    if latency > 0 && latency < 100 {
++        quality_bonus += 0.1;
++    }
++    if connect_time > 0 && connect_time < 10 {
++        quality_bonus += 0.1;
++    }
++    if matches!(scene, Scene::Streaming | Scene::Transfer) && input.download_mb > 20.0 {
++        quality_bonus += 0.1;
++    }
++    if scene == Scene::Interactive && latency > 0 && latency < 100 && success_rate > 0.9 {
++        quality_bonus += 0.1;
++    }
++    quality_bonus = quality_bonus.min(0.3);
++
++    let loss_factor = if input.loss_rate > 0.0 || input.cumul_loss_rate > 0.0 {
++        let cur = if input.loss_rate > 0.0 {
++            1.0 - (-input.loss_rate * 10.0).exp()
++        } else {
++            0.0
++        };
++        let cum = if input.cumul_loss_rate > 0.0 {
++            1.0 - (-input.cumul_loss_rate * 50.0).exp()
++        } else {
++            0.0
++        };
++        let ema = if input.ema_loss_rate > 0.0 {
++            1.0 - (-input.ema_loss_rate * 50.0).exp()
++        } else {
++            0.0
++        };
++        let trust = (cum * 5.0).min(1.0);
++        let improve = if cum > 0.0 && ema > 0.0 && ema < cum {
++            ema / cum
++        } else {
++            1.0
++        };
++        trust * cur.max(cum) * improve + (1.0 - trust) * cur * 0.3
++    } else {
++        0.0
++    };
++
++    let w = base_weight
++        * (1.0 + tf * params.traffic_weight + duration_factor * params.duration_weight
++            + quality_bonus * params.quality_weight
++            - loss_factor * params.loss_weight)
++        * priority_factor;
++    (w, false)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const TINY_MODEL: &str = "\
++tree
++version=v4
++num_class=1
++num_tree_per_iteration=1
++label_index=0
++max_feature_idx=29
++objective=regression
++
++Tree=0
++num_leaves=3
++num_cat=1
++split_feature=0 19
++threshold=5.0 0
++decision_type=2 9
++left_child=-1 -2
++right_child=1 -3
++leaf_value=0.4 1.2 0.8
++cat_boundaries=0 4
++cat_threshold=0 0 0 16
++is_linear=0
++shrinkage=1
++
++end of trees
++
++[transforms]
++[order]
++0=success
++1=failure
++[/order]
++[definitions]
++robust_type=RobustScaler
++robust_features=0,1
++robust_center=2.0,0.0
++robust_scale=1.0,1.0
++[/definitions]
++transform=true
++[/transforms]
++";
++
++    #[test]
++    fn parses_numerical_categorical_and_transforms() {
++        let model = WeightModel::load_from_bytes(TINY_MODEL.as_bytes()).unwrap();
++        assert_eq!(model.n_trees(), 1);
++        assert_eq!(model.n_features(), 30);
++
++        // success=4 -> scaled=(4-2)/1 = 2 <= 5.0 -> left leaf 0 => 0.4
++        let mut low = ModelInput {
++            success: 4,
++            failure: 0,
++            is_tcp: true,
++            ..ModelInput::default()
++        };
++        let (w_low, used) = model.predict_weight(&low, 1.0);
++        assert!(used);
++        assert!((w_low - 0.4).abs() < 1e-9, "got {w_low}");
++
++        // success=10 -> scaled=8 > 5.0 -> node 1 checks feature 19 (asn_feature)
++        // bit 100 = 3*32 + 4 -> word 3 has bit 4 (16) -> "google" maps to 100 -> left leaf 1 => 1.2
++        low.success = 10;
++        low.dest_ip_asn = "AS15169 Google LLC".into();
++        let (w_google, used) = model.predict_weight(&low, 1.5);
++        assert!(used);
++        assert!((w_google - 1.8).abs() < 1e-9, "got {w_google}");
++
++        // non-matching ASN goes to right leaf 2 => 0.8
++        low.dest_ip_asn = "AS13335 Cloudflare".into();
++        let (w_cf, used) = model.predict_weight(&low, 1.0);
++        assert!(used);
++        assert!((w_cf - 0.8).abs() < 1e-9, "got {w_cf}");
++    }
++
++    #[test]
++    fn feature_hashes_and_categories_match_vernesong() {
++        assert_eq!(extract_asn_feature("AS15169 Google LLC"), 100);
++        assert_eq!(extract_asn_feature("AS13335 Cloudflare"), 105);
++        assert_eq!(extract_geoip_feature("HK"), 101);
++        assert_eq!(extract_domain_type_feature("www.youtube.com"), 100);
++        assert_eq!(extract_domain_type_feature("dns.google"), 104);
++        assert_eq!(extract_port_feature(443), 106);
++        assert_eq!(extract_port_feature(53), 7);
++        assert_eq!(derive_connection_type(443, 100, 106), 2);
++        assert_eq!(derive_connection_type(443, 111, 106), 1);
++    }
++
++    #[test]
++    fn loads_real_vernesong_model_if_present() {
++        let Ok(path) = std::env::var("CONCORD_TEST_LGBM_MODEL") else {
++            return;
++        };
++        let model = WeightModel::load_from_file(Path::new(&path)).unwrap();
++        assert!(model.n_trees() >= 100);
++        assert!(model.n_features() >= 30);
++
++        let fast_node = ModelInput {
++            success: 50,
++            failure: 0,
++            connect_time_ms: 25,
++            latency_ms: 40,
++            upload_mb: 0.5,
++            history_upload_mb: 10.0,
++            max_upload_rate_kb: 500.0,
++            history_max_upload_rate_kb: 1000.0,
++            download_mb: 8.0,
++            history_download_mb: 120.0,
++            max_download_rate_kb: 4000.0,
++            history_max_download_rate_kb: 6000.0,
++            duration_minutes: 2.0,
++            history_duration_minutes: 3.0,
++            last_used_unix: now_unix_secs() - 10,
++            is_tcp: true,
++            host: "www.youtube.com".into(),
++            dest_port: 443,
++            dest_geoip: "US".into(),
++            dest_ip_asn: "AS15169 Google LLC".into(),
++            ..ModelInput::default()
++        };
++        let slow_node = ModelInput {
++            success: 3,
++            failure: 12,
++            connect_time_ms: 1800,
++            latency_ms: 950,
++            upload_mb: 0.01,
++            download_mb: 0.02,
++            duration_minutes: 0.5,
++            last_used_unix: now_unix_secs() - 3600,
++            is_tcp: true,
++            loss_rate: 0.25,
++            cumul_loss_rate: 0.20,
++            host: "www.youtube.com".into(),
++            dest_port: 443,
++            dest_geoip: "US".into(),
++            dest_ip_asn: "AS15169 Google LLC".into(),
++            ..ModelInput::default()
++        };
++        let (w_fast, used_fast) = model.predict_weight(&fast_node, 1.0);
++        let (w_slow, used_slow) = model.predict_weight(&slow_node, 1.0);
++        assert!(used_fast && used_slow);
++        assert!(
++            w_fast > w_slow,
++            "expected fast node ({w_fast}) > slow node ({w_slow})"
++        );
++    }
++
++    #[test]
++    fn smart_state_with_lightgbm_scores_and_flushes_weights() {
++        use std::sync::Arc;
++        use std::time::Duration;
++        use arc_swap::ArcSwapOption;
++        use super::super::{FlowEnd, Settings, SmartState, Stamp};
++
++        let model = Arc::new(WeightModel::load_from_bytes(TINY_MODEL.as_bytes()).unwrap());
++        let slot = Arc::new(ArcSwapOption::from(Some(model)));
++        let settings = Settings {
++            tolerance_ms: 0,
++            max_failed: 5,
++            half_life: Duration::from_secs(300),
++            probe_timeout: Duration::from_secs(5),
++        };
++        let state = SmartState::new_with_lgbm(settings, true, slot);
++        let now = Stamp::now();
++        let names: Vec<Arc<str>> = vec![Arc::from("a"), Arc::from("b")];
++        let cands = crate::smart::tests::cands(&names, &[100, 120]);
++        let view = cands.view();
++        // Initially 'a' wins (100ms < 120ms).
++        let (idx, _) = state.pick(now, None, &view, None, true);
++        assert_eq!(idx, 0);
++
++        // Give 'a' 3 successes (TINY_MODEL returns 0.4) and 'b' 10 successes (TINY_MODEL returns 0.8).
++        for _ in 0..3 {
++            let tap = state.flow_with_meta(names[0].clone(), Arc::from("example.com"), false, 443, None);
++            tap.on_upload_bytes(1024);
++            tap.on_download_bytes(4096);
++            let _ = tap.finish(FlowEnd { download: 4096, remote_first: Some(true), cancelled: false });
++        }
++        for _ in 0..10 {
++            let tap = state.flow_with_meta(names[1].clone(), Arc::from("example.com"), false, 443, None);
++            tap.on_upload_bytes(1024);
++            tap.on_download_bytes(4096);
++            let _ = tap.finish(FlowEnd { download: 4096, remote_first: Some(true), cancelled: false });
++        }
++
++        let weights = state.smart_weights(&view);
++        assert!(weights.get("b").copied().unwrap_or(0.0) > weights.get("a").copied().unwrap_or(0.0));
++
++        // Now 'b' effective score (120 / 0.8 = 150) beats 'a' (100 / 0.4 = 250)!
++        let (idx_after, _) = state.pick(now, None, &view, None, true);
++        assert_eq!(idx_after, 1);
++
++        // Flushing resets learned weights and restores raw delay preference ('a').
++        state.flush_smart_weights();
++        assert!(state.smart_weights(&view).is_empty());
++        let (idx_reset, _) = state.pick(now, None, &view, None, true);
++        assert_eq!(idx_reset, 0);
++    }
++}
+diff --git a/crates/group/src/smart/mod.rs b/crates/group/src/smart/mod.rs
+index e5dc74c..4296ea5 100644
+--- a/crates/group/src/smart/mod.rs
++++ b/crates/group/src/smart/mod.rs
+@@ -7,6 +7,7 @@ mod book;
+ #[cfg(test)]
+ mod diff_tests;
+ mod flow;
++pub mod lgbm;
+ mod node;
+ mod owner;
+ mod select;
+@@ -17,10 +18,12 @@ mod stamp;
+ #[cfg(test)]
+ mod tests;
+ 
++use std::collections::HashMap;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicU64, Ordering};
+-use std::time::Duration;
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
++use arc_swap::ArcSwapOption;
+ use concord_common::sync::lock;
+ use std::sync::Mutex;
+ 
+@@ -28,6 +31,7 @@ use std::sync::Mutex;
+ pub(crate) use book::take_align_scans;
+ use book::{Book, Failure};
+ pub use flow::{FlowEnd, FlowTap};
++pub use lgbm::{DEFAULT_LGBM_URL, WeightModel};
+ use node::Rtt;
+ #[cfg(test)]
+ pub(crate) use node::take_exp2_calls;
+@@ -117,19 +121,59 @@ pub(crate) enum FailKind {
+ 
+ pub(crate) struct SmartState {
+     settings: Settings,
++    use_lightgbm: bool,
++    model: Arc<ArcSwapOption<WeightModel>>,
+     book: Mutex<Book>,
+     flows: AtomicU64,
+ }
+ 
+ impl SmartState {
++    #[cfg(test)]
+     pub fn new(settings: Settings) -> Arc<SmartState> {
++        Self::new_with_lgbm(settings, false, Arc::new(ArcSwapOption::empty()))
++    }
++
++    pub fn new_with_lgbm(
++        settings: Settings,
++        use_lightgbm: bool,
++        model: Arc<ArcSwapOption<WeightModel>>,
++    ) -> Arc<SmartState> {
+         Arc::new(SmartState {
+             settings,
++            use_lightgbm,
++            model,
+             book: Mutex::new(Book::default()),
+             flows: AtomicU64::new(0),
+         })
+     }
+ 
++    pub fn flush_smart_weights(&self) {
++        let mut book = lock(&self.book);
++        book.sites.clear();
++        for node in book.nodes.values_mut() {
++            node.clear_lgbm();
++        }
++    }
++
++    pub fn smart_weights(&self, candidates: &CandidateView<'_>) -> HashMap<String, f64> {
++        let book = lock(&self.book);
++        let mut out = HashMap::new();
++        for index in 0..candidates.len() {
++            let Some(name) = candidates.name(index) else {
++                continue;
++            };
++            let (state, _) = select::state_of(&book.nodes, index, name);
++            let factor = candidates.factor(index);
++            if let Some(w) = state.and_then(|s| s.lgbm.weight)
++                && w.is_finite()
++                && w > 0.0
++            {
++                out.insert(name.to_string(), w * factor);
++            }
++        }
++        out
++    }
++
+     /// TCP with a site key, or UDP (`site` `None`). `touch` false is read-only: no memory update, no judgement
+     /// and no actions. `candidates` is every member, ejected ones included.
+     pub fn pick(
+@@ -162,6 +206,7 @@ impl SmartState {
+             book.default.as_deref(),
+             tolerance,
+             touch,
++            self.use_lightgbm,
+         );
+         if touch {
+             let default = candidates.name(summary.global);
+@@ -191,19 +236,26 @@ impl SmartState {
+                                 now,
+                             )
+                         });
+-                        if let Some(index) = current
++                        if !self.use_lightgbm
++                            && let Some(index) = current
+                             && (entry.problem || !entry.is_demoted(&entry.node))
+                         {
+                             index
+                         } else {
+-                            let rows =
+-                                select::rows(&book.nodes, now, candidates, settings.half_life);
++                            let rows = select::rows(
++                                &book.nodes,
++                                now,
++                                candidates,
++                                settings.half_life,
++                                self.use_lightgbm,
++                            );
+                             select::site_choice(
+                                 &rows,
+                                 entry,
+                                 book.default.as_deref(),
+                                 tolerance,
+                                 summary.global,
++                                self.use_lightgbm,
+                             )
+                         }
+                     }
+@@ -235,6 +287,7 @@ impl SmartState {
+             book.default.as_deref(),
+             f64::from(self.settings.tolerance_ms),
+             false,
++            self.use_lightgbm,
+         )
+         .global
+     }
+@@ -406,7 +459,13 @@ impl SmartState {
+         exclude: &[Arc<str>],
+     ) -> Vec<usize> {
+         let book = lock(&self.book);
+-        let rows = select::rows(&book.nodes, now, candidates, self.settings.half_life);
++        let rows = select::rows(
++            &book.nodes,
++            now,
++            candidates,
++            self.settings.half_life,
++            self.use_lightgbm,
++        );
+         let open = |row: &Row<'_>| !exclude.contains(row.name);
+         let tolerance = f64::from(self.settings.tolerance_ms);
+         let first = select::default_of(&rows, book.default.as_deref(), tolerance, open);
+@@ -442,9 +501,21 @@ impl SmartState {
+         order
+     }
+ 
++    #[cfg(test)]
+     pub fn flow(self: &Arc<Self>, node: Arc<str>, site: Arc<str>, tls: bool) -> FlowTap {
++        self.flow_with_meta(node, site, tls, 443, None)
++    }
++
++    pub fn flow_with_meta(
++        self: &Arc<Self>,
++        node: Arc<str>,
++        site: Arc<str>,
++        tls: bool,
++        dst_port: u16,
++        dst_ip: Option<Arc<str>>,
++    ) -> FlowTap {
+         let id = self.flows.fetch_add(1, Ordering::Relaxed);
+-        FlowTap::new(self.clone(), id, node, site, tls)
++        FlowTap::new(self.clone(), id, node, site, tls, dst_port, dst_ip)
+     }
+ 
+     pub(super) fn flow_uploaded(&self, flow: &flow::FlowRef<'_>, now: Stamp) {
+@@ -462,9 +533,96 @@ impl SmartState {
+         answered: bool,
+         end: &FlowEnd,
+     ) -> Actions {
+-        let mut book = lock(&self.book);
+-        let actions = book.flow_ended(flow, now, answered, end, &self.settings);
+-        book.finish(actions)
++        let (actions, model_input) = {
++            let mut book = lock(&self.book);
++            let actions = book.flow_ended(flow, now, answered, end, &self.settings);
++            let actions = book.finish(actions);
++            let input = if self.use_lightgbm {
++                let succeeded = answered || end.download > 0;
++                let dur_secs = now.since(&flow.started_at).as_secs_f64().max(0.001);
++                let dur_min = dur_secs / 60.0;
++                let upload_mb = (flow.upload_bytes as f64) / 1_048_576.0;
++                let download_bytes = flow.download_bytes.max(end.download);
++                let download_mb = (download_bytes as f64) / 1_048_576.0;
++                let up_rate_kb = (flow.upload_bytes as f64 / 1024.0) / dur_secs.max(0.1);
++                let dl_rate_kb = (download_bytes as f64 / 1024.0) / dur_secs.max(0.1);
++                let unix_now = SystemTime::now()
++                    .duration_since(UNIX_EPOCH)
++                    .map_or(0, |d| d.as_secs() as i64);
++                let site_rtt = book
++                    .sites
++                    .live(flow.site, now)
++                    .and_then(|s| s.srtt(flow.node));
++                let node_state = book.node_mut(flow.node, now);
++                if succeeded {
++                    node_state.lgbm.success = node_state.lgbm.success.saturating_add(1);
++                } else if !end.cancelled {
++                    node_state.lgbm.failure = node_state.lgbm.failure.saturating_add(1);
++                }
++                node_state.lgbm.history_upload_mb += upload_mb;
++                node_state.lgbm.history_download_mb += download_mb;
++                if up_rate_kb > node_state.lgbm.history_max_upload_kb {
++                    node_state.lgbm.history_max_upload_kb = up_rate_kb;
++                }
++                if dl_rate_kb > node_state.lgbm.history_max_download_kb {
++                    node_state.lgbm.history_max_download_kb = dl_rate_kb;
++                }
++                node_state.lgbm.history_duration_min = if node_state.lgbm.history_duration_min == 0.0
++                {
++                    dur_min
++                } else {
++                    0.8 * node_state.lgbm.history_duration_min + 0.2 * dur_min
++                };
++                node_state.lgbm.last_used_unix = unix_now;
++
++                let connect_ms = node_state.connect.map_or(0, |r| r.srtt.round() as i64);
++                let latency_ms = site_rtt
++                    .or_else(|| node_state.connect.map(|r| r.srtt))
++                    .map_or(connect_ms, |ms| ms.round() as i64);
++                let total = node_state.lgbm.success + node_state.lgbm.failure;
++                (total >= lgbm::DEFAULT_MIN_SAMPLE_COUNT).then(|| lgbm::ModelInput {
++                    success: node_state.lgbm.success,
++                    failure: node_state.lgbm.failure,
++                    connect_time_ms: connect_ms,
++                    latency_ms,
++                    upload_mb,
++                    history_upload_mb: node_state.lgbm.history_upload_mb,
++                    max_upload_rate_kb: up_rate_kb,
++                    history_max_upload_rate_kb: node_state.lgbm.history_max_upload_kb,
++                    download_mb,
++                    history_download_mb: node_state.lgbm.history_download_mb,
++                    max_download_rate_kb: dl_rate_kb,
++                    history_max_download_rate_kb: node_state.lgbm.history_max_download_kb,
++                    duration_minutes: dur_min,
++                    history_duration_minutes: node_state.lgbm.history_duration_min,
++                    last_used_unix: unix_now,
++                    is_udp: false,
++                    is_tcp: true,
++                    connection_failed: !succeeded,
++                    host: flow.site.to_string(),
++                    dest_ip: flow.dst_ip.unwrap_or_default().to_string(),
++                    dest_port: flow.dst_port,
++                    ..lgbm::ModelInput::default()
++                })
++            } else {
++                None
++            };
++            (actions, input)
++        };
++
++        // Run LightGBM inference outside the mutex lock to keep pick() lock-free.
++        if let Some(input) = model_input {
++            let weight = match self.model.load_full() {
++                Some(model) => model.predict_weight(&input, 1.0).0,
++                None => lgbm::calculate_weight(&input, 1.0).0,
++            };
++            if weight.is_finite() && weight > 0.0 {
++                let mut book = lock(&self.book);
++                book.node_mut(flow.node, now).lgbm.weight = Some(weight);
++                book.sites.set_lgbm_weight(flow.site, flow.node, weight, now);
++            }
++        }
++        actions
+     }
+ 
+     pub(super) fn stash(&self, actions: Actions) {
+diff --git a/crates/group/src/smart/node.rs b/crates/group/src/smart/node.rs
+index 7b3e806..0d016df 100644
+--- a/crates/group/src/smart/node.rs
++++ b/crates/group/src/smart/node.rs
+@@ -61,6 +61,19 @@ fn decay_factor(dt: Duration, half_life: Duration) -> f64 {
+     (-dt.as_secs_f64() / half_life.as_secs_f64()).exp2()
+ }
+ 
++#[derive(Clone, Debug, Default)]
++pub(super) struct LgbmMetrics {
++    pub success: i64,
++    pub failure: i64,
++    pub history_upload_mb: f64,
++    pub history_download_mb: f64,
++    pub history_max_upload_kb: f64,
++    pub history_max_download_kb: f64,
++    pub history_duration_min: f64,
++    pub last_used_unix: i64,
++    pub weight: Option<f64>,
++}
++
+ pub(super) struct NodeState {
+     successes: f64,
+     failures: f64,
+@@ -73,6 +86,7 @@ pub(super) struct NodeState {
+     recovering: bool,
+     site_fails: HashSet<Arc<str>>,
+     pub connect: Option<Rtt>,
++    pub lgbm: LgbmMetrics,
+ }
+ 
+ impl NodeState {
+@@ -89,9 +103,14 @@ impl NodeState {
+             recovering: false,
+             site_fails: HashSet::new(),
+             connect: None,
++            lgbm: LgbmMetrics::default(),
+         }
+     }
+ 
++    pub fn clear_lgbm(&mut self) {
++        self.lgbm = LgbmMetrics::default();
++    }
++
+     fn decay(&mut self, now: Stamp, half_life: Duration) {
+         let dt = now.since(&self.counted_at);
+         if dt.is_zero() {
+diff --git a/crates/group/src/smart/owner.rs b/crates/group/src/smart/owner.rs
+index 0653c19..7c178d6 100644
+--- a/crates/group/src/smart/owner.rs
++++ b/crates/group/src/smart/owner.rs
+@@ -1,13 +1,18 @@
++use std::collections::HashMap;
+ use std::future::Future;
+ use std::pin::pin;
+ use std::sync::{Arc, Mutex, OnceLock, Weak};
+ use std::time::Duration;
+ 
++use arc_swap::ArcSwapOption;
+ use concord_common::FlowMeta;
+ use concord_common::sync::lock;
+ use futures_util::future::{Either, join_all, select};
+ 
+-use super::{Actions, Arbitrate, DEFAULT_HALF_LIFE, FlowEnd, FlowTap, Settings, SmartState, Stamp};
++use super::{
++    Actions, Arbitrate, DEFAULT_HALF_LIFE, FlowEnd, FlowTap, Settings, SmartState, Stamp,
++    WeightModel,
++};
+ use crate::group::{Group, Members, Touch};
+ use crate::health::Outcome;
+ use crate::node::Node;
+@@ -70,6 +75,10 @@ impl<'a> CandidateView<'a> {
+         self.members.nodes().get(index).map(Node::name)
+     }
+ 
++    pub fn factor(&self, index: usize) -> f64 {
++        self.members.factor(index)
++    }
++
+     pub fn base_score(&self, index: usize) -> Option<f64> {
+         self.base_scores.get(index).copied().flatten()
+     }
+@@ -108,23 +117,38 @@ impl Owner {
+         max_failed: u32,
+         interval: Duration,
+         probe_timeout: Duration,
++        use_lightgbm: bool,
++        model: Arc<ArcSwapOption<WeightModel>>,
+     ) -> Owner {
+         Owner {
+-            state: SmartState::new(Settings {
+-                tolerance_ms: tolerance,
+-                max_failed,
+-                half_life: if interval.is_zero() {
+-                    DEFAULT_HALF_LIFE
+-                } else {
+-                    interval
++            state: SmartState::new_with_lgbm(
++                Settings {
++                    tolerance_ms: tolerance,
++                    max_failed,
++                    half_life: if interval.is_zero() {
++                        DEFAULT_HALF_LIFE
++                    } else {
++                        interval
++                    },
++                    probe_timeout,
+                 },
+-                probe_timeout,
+-            }),
++                use_lightgbm,
++                model,
++            ),
+             outbounds: OnceLock::new(),
+             table: Mutex::new(None),
+         }
+     }
+ 
++    pub fn flush_smart_weights(&self) {
++        self.state.flush_smart_weights();
++    }
++
++    pub fn smart_weights(&self, group: &Group, members: &Arc<Members>) -> HashMap<String, f64> {
++        let candidates = self.candidates(group, members);
++        self.state.smart_weights(&candidates)
++    }
++
+     pub fn bind(&self, outbounds: Weak<Outbounds>) {
+         let _ = self.outbounds.set(outbounds);
+     }
+@@ -331,14 +355,22 @@ impl SmartFlow {
+     }
+ 
+     pub fn on_upload(&self) {
++        self.on_upload_bytes(0);
++    }
++
++    pub fn on_upload_bytes(&self, bytes: u64) {
+         for (_, tap) in &self.taps {
+-            tap.on_upload();
++            tap.on_upload_bytes(bytes);
+         }
+     }
+ 
+     pub fn on_download(&self) {
++        self.on_download_bytes(0);
++    }
++
++    pub fn on_download_bytes(&self, bytes: u64) {
+         for (_, tap) in &self.taps {
+-            tap.on_download();
++            tap.on_download_bytes(bytes);
+         }
+     }
+ 
+diff --git a/crates/group/src/smart/select.rs b/crates/group/src/smart/select.rs
+index a8dfe16..870141a 100644
+--- a/crates/group/src/smart/select.rs
++++ b/crates/group/src/smart/select.rs
+@@ -81,6 +81,7 @@ pub(super) fn summarize(
+     previous: Option<&str>,
+     tolerance: f64,
+     need_runner_up: bool,
++    use_lightgbm: bool,
+ ) -> Summary {
+     let mut first_live: Option<usize> = None;
+     let mut best_scored: Option<(usize, f64)> = None;
+@@ -102,8 +103,16 @@ pub(super) fn summarize(
+             continue;
+         }
+         first_live.get_or_insert(index);
+-        let score =
+-            base_score.map(|base| base + state.map_or(0.0, |s| s.penalty_ms(now, half_life)));
++        let lgbm_mult = if use_lightgbm {
++            state
++                .and_then(|s| s.lgbm.weight)
++                .filter(|w| w.is_finite() && *w > 0.0)
++                .map_or(1.0, |w| w.clamp(0.1, 4.0))
++        } else {
++            1.0
++        };
++        let score = base_score
++            .map(|base| base / lgbm_mult + state.map_or(0.0, |s| s.penalty_ms(now, half_life)));
+         if let Some(score) = score
+             && best_scored.is_none_or(|(_, least)| score < least)
+         {
+@@ -153,6 +162,7 @@ pub(super) fn rows<'a>(
+     now: Stamp,
+     candidates: &CandidateView<'a>,
+     half_life: Duration,
++    use_lightgbm: bool,
+ ) -> Vec<Row<'a>> {
+     #[cfg(test)]
+     ROW_ALLOCS.with(|allocs| allocs.set(allocs.get() + 1));
+@@ -161,10 +171,18 @@ pub(super) fn rows<'a>(
+             let (name, base_score) = candidates.get(index)?;
+             let (state, _) = state_of(nodes, index, name);
+             let (ejected, left) = state.map_or((false, Duration::ZERO), |s| s.ejection(now));
++            let lgbm_mult = if use_lightgbm {
++                state
++                    .and_then(|s| s.lgbm.weight)
++                    .filter(|w| w.is_finite() && *w > 0.0)
++                    .map_or(1.0, |w| w.clamp(0.1, 4.0))
++            } else {
++                1.0
++            };
+             let score = (!ejected)
+                 .then_some(base_score)
+                 .flatten()
+-                .map(|base| base + state.map_or(0.0, |s| s.penalty_ms(now, half_life)));
++                .map(|base| base / lgbm_mult + state.map_or(0.0, |s| s.penalty_ms(now, half_life)));
+             Some(Row {
+                 name,
+                 score,
+@@ -247,6 +265,7 @@ pub(super) fn site_choice(
+     previous: Option<&str>,
+     tolerance: f64,
+     global: usize,
++    use_lightgbm: bool,
+ ) -> usize {
+     let current = position(rows, &entry.node)
+         .filter(|&index| rows.get(index).is_some_and(|row| !row.ejected));
+@@ -255,6 +274,30 @@ pub(super) fn site_choice(
+             .or_else(|| least_srtt(rows, entry, |row| !row.ejected))
+             .unwrap_or(global);
+     }
++    if use_lightgbm {
++        let best_lgbm = rows
++            .iter()
++            .enumerate()
++            .filter(|(_, row)| !row.ejected && !entry.is_demoted(row.name))
++            .filter_map(|(index, row)| {
++                entry
++                    .lgbm_weight(row.name)
++                    .filter(|w| w.is_finite() && *w > 0.0)
++                    .map(|w| (index, w))
++            })
++            .max_by(|a, b| a.1.total_cmp(&b.1));
++        if let Some((best_idx, best_w)) = best_lgbm {
++            if let Some(cur_idx) = current
++                && !entry.is_demoted(&entry.node)
++                && entry
++                    .lgbm_weight(&entry.node)
++                    .is_some_and(|cur_w| cur_w >= best_w * 0.9)
++            {
++                return cur_idx;
++            }
++            return best_idx;
++        }
++    }
+     if let Some(index) = current
+         && !entry.is_demoted(&entry.node)
+     {
+diff --git a/crates/group/src/smart/site.rs b/crates/group/src/smart/site.rs
+index 7afea4d..95a8e61 100644
+--- a/crates/group/src/smart/site.rs
++++ b/crates/group/src/smart/site.rs
+@@ -18,6 +18,7 @@ pub(super) struct Site {
+     pub demoted: Vec<Arc<str>>,
+     pub problem: bool,
+     rtt: Vec<(Arc<str>, Rtt)>,
++    lgbm_weights: Vec<(Arc<str>, f64)>,
+     pub flows: Vec<Unanswered>,
+ }
+ 
+@@ -29,6 +30,13 @@ impl Site {
+             .map(|(_, rtt)| rtt.srtt)
+     }
+ 
++    pub fn lgbm_weight(&self, node: &str) -> Option<f64> {
++        self.lgbm_weights
++            .iter()
++            .find(|(name, _)| name.as_ref() == node)
++            .map(|(_, w)| *w)
++    }
++
+     pub fn is_demoted(&self, node: &str) -> bool {
+         self.demoted.iter().any(|name| name.as_ref() == node)
+     }
+@@ -130,6 +138,7 @@ impl SiteBook {
+                 demoted: Vec::new(),
+                 problem: false,
+                 rtt: Vec::new(),
++                lgbm_weights: Vec::new(),
+                 flows: Vec::new(),
+             },
+         );
+@@ -199,6 +208,16 @@ impl SiteBook {
+         }
+     }
+ 
++    pub fn set_lgbm_weight(&mut self, site: &str, node: &Arc<str>, weight: f64, now: Stamp) {
++        let Some(entry) = self.live_mut(site, now) else {
++            return;
++        };
++        match entry.lgbm_weights.iter_mut().find(|(name, _)| name == node) {
++            Some((_, slot)) => *slot = weight,
++            None => entry.lgbm_weights.push((node.clone(), weight)),
++        }
++    }
++
+     /// Marks each flow that has gone `limit` without a download as judged and returns it once.
+     pub fn overdue(&mut self, now: Stamp, limit: Duration) -> Vec<(Arc<str>, Arc<str>, Duration)> {
+         let mut out = Vec::new();
+diff --git a/crates/tunnel/src/smart.rs b/crates/tunnel/src/smart.rs
+index 7eae8d2..a993e6a 100644
+--- a/crates/tunnel/src/smart.rs
++++ b/crates/tunnel/src/smart.rs
+@@ -27,12 +27,12 @@ pub(crate) struct SmartMeter<'a> {
+ impl Meter for SmartMeter<'_> {
+     fn on_upload(&self, bytes: u64) {
+         self.tracked.uploaded(bytes);
+-        self.flow.on_upload();
++        self.flow.on_upload_bytes(bytes);
+     }
+ 
+     fn on_download(&self, bytes: u64) {
+         self.tracked.downloaded(bytes);
+-        self.flow.on_download();
++        self.flow.on_download_bytes(bytes);
+     }
+ }
+ 
+@@ -56,9 +56,19 @@ pub(crate) fn tap(
+         return None;
+     }
+     let site = Outbounds::smart_site(&flow.meta, flow.host.as_deref())?;
+-    runtime
+-        .outbounds
+-        .smart_flow(&decision.chain, &site, head.first() == Some(&TLS_RECORD))
++    let dst_port = flow.meta.dst.port();
++    let dst_ip = flow
++        .meta
++        .dst
++        .ip()
++        .map(|ip| Arc::from(ip.to_string()));
++    runtime.outbounds.smart_flow_with_meta(
++        &decision.chain,
++        &site,
++        head.first() == Some(&TLS_RECORD),
++        dst_port,
++        dst_ip,
++    )
+ }
+ 
+ fn attempt_deadline(started: Instant, overall: Instant, budget: Option<Duration>) -> Instant {

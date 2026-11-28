@@ -6,7 +6,7 @@
 
 **[简体中文](README.md) · English**
 
-[![Release](https://img.shields.io/github/v/release/user-7392/nikki-concord?include_prereleases&label=Release&color=blue)](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32)
+[![Release](https://img.shields.io/github/v/release/user-7392/nikki-concord?include_prereleases&label=Release&color=blue)](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32-lgbm)
 [![OpenWrt](https://img.shields.io/badge/OpenWrt-25.12%20%7C%2024.10%20%7C%2023.05-00B5E2)](#installation)
 [![Arch](https://img.shields.io/badge/Arch-aarch64%20%7C%20x86__64-555555)](#installation)
 [![License](https://img.shields.io/badge/License-GPL--3.0--or--later-green)](#upstream-projects-and-licenses)
@@ -85,17 +85,17 @@ opkg print-architecture
 
 ### 2. Download the matching package
 
-Download the package for your architecture from the [v0.1.0-r32 release](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32). Checksums are in `SHA256SUMS-r32-all`.
+Download the package for your architecture from the [v0.1.0-r32-lgbm release](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32-lgbm). Checksums are in `SHA256SUMS-r32-lgbm-all`.
 
 | Architecture | OpenWrt 25.12+ (`.apk`) | OpenWrt / ImmortalWrt 23.05 and 24.10 (`.ipk`) |
 | :--- | :--- | :--- |
-| `aarch64_cortex-a53` | `luci-app-nikki-concord-0.1.0-r32.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a53.ipk` |
-| `aarch64_cortex-a72` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a72.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a72.ipk` |
-| `aarch64_generic` | `luci-app-nikki-concord-0.1.0-r32_aarch64_generic.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_generic.ipk` |
-| `x86_64` | `luci-app-nikki-concord-0.1.0-r32_x86_64.apk` | `luci-app-nikki-concord-0.1.0-r32_x86_64.ipk` |
+| `aarch64_cortex-a53` | `luci-app-nikki-concord-0.1.0l-r32.apk` | `luci-app-nikki-concord-0.1.0l-r32_aarch64_cortex-a53.ipk` |
+| `aarch64_cortex-a72` | `luci-app-nikki-concord-0.1.0l-r32_aarch64_cortex-a72.apk` | `luci-app-nikki-concord-0.1.0l-r32_aarch64_cortex-a72.ipk` |
+| `aarch64_generic` | `luci-app-nikki-concord-0.1.0l-r32_aarch64_generic.apk` | `luci-app-nikki-concord-0.1.0l-r32_aarch64_generic.ipk` |
+| `x86_64` | `luci-app-nikki-concord-0.1.0l-r32_x86_64.apk` | `luci-app-nikki-concord-0.1.0l-r32_x86_64.ipk` |
 
 > [!NOTE]
-> **Optional LightGBM experimental branch.** The main build already supports `smart` proxy groups natively (heuristic scoring), which is sufficient for most users. If you specifically want `uselightgbm: true` model inference, download [**v0.1.0-r32-lgbm**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32-lgbm) from the separate experimental branch (kept out of `main` and ignored by the main build's Check Update).
+> This branch provides the experimental LightGBM build. Check Update only selects LightGBM releases.
 
 ### 3. Install, enable, and upgrade
 
@@ -131,6 +131,7 @@ Key behavioral differences from Mihomo (full protocol and field list: [Concord c
 
 ## Router adaptations
 
+- **Smart LightGBM (`smart-lgbm` branch).** Pure-Rust LightGBM v4 inference compatible with `Model.bin` (`uselightgbm`, `lgbm-url`, `lgbm-auto-update`, `lgbm-update-interval`); zero overhead when off, ~3 MiB RAM when on; exposes `GET /group/weights` and `POST /cache/smart/flush`.
 - **Memory and flash wear.** Linux musl builds use router-tuned `jemalloc` (4 KiB pages, single arena, prompt reclamation) and cap `/group/:name/delay` at 10 concurrent probes; `profile.store-fake-ip` batches writes in 30-second windows.
 - **Networking and config.** Optional IPv6-first TCP dialing for proxy servers (**Mixin Config → General Config**); unknown top-level Mihomo keys are ignored silently while preserving YAML anchors; reloads and upgrades preflight configs and preserve the running state on error.
 - **Dashboard and logs.** Built-in controller serves Zashboard and HTTPS with `POST /upgrade/geo`, rule hit stats, and temporary per-rule disabling; application and core logs are each capped at **1 MiB** (trimmed to ~256 KiB).
@@ -150,6 +151,7 @@ git clone https://github.com/Vialibrex/concord.git build/concord-src
 git -C build/concord-src checkout --detach "$(cat core/upstream-revision)"
 git -C build/concord-src apply "$PWD/core/concord.patch"
 git -C build/concord-src apply "$PWD/core/concord-openwrt-controller.patch"
+git -C build/concord-src apply "$PWD/core/concord-smart-lgbm.patch"
 
 cpu=aarch64
 arch=aarch64_cortex-a53
@@ -173,10 +175,10 @@ python3 build-root.py --direct-core --cpu "$cpu" --core "build/concord-$cpu.gz" 
 node check-luci.mjs "build/package-$cpu"
 
 # Package for OpenWrt 25.12+ (.apk)
-python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$arch.apk"
+python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0l-r32_$arch.apk"
 
 # Package for OpenWrt / ImmortalWrt 23.05 & 24.10 (.ipk)
-python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$arch.ipk"
+python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0l-r32_$arch.ipk"
 ```
 
 The three ARM64 package architectures (`aarch64_cortex-a53`, `aarch64_cortex-a72`, and `aarch64_generic`) share the `cpu=aarch64` build. Set `arch` to select the package architecture. For x86-64, set both `cpu` and `arch` to `x86_64`.
