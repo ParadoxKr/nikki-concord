@@ -1,0 +1,503 @@
+msgid "After changing the controller address, API secret, TLS settings, or dashboard download URL, restart the service to apply the changes."
+msgstr "修改控制器位址、API 金鑰、TLS 設定或面板下載位址後，請重新啟動服務以套用變更。"
+
+msgid "TUN TCP congestion control"
+msgstr "TUN TCP 壅塞控制"
+
+msgid "Prefer IPv6 for proxy server TCP connections"
+msgstr "代理伺服器 TCP 連線優先 IPv6"
+
+msgid "Prefer IPv6 with IPv4 fallback when opening TCP connections to dual-stack proxy servers. Explicit node IP preferences take precedence. Requires IPv6 and AAAA resolution."
+msgstr "連線至雙棧代理伺服器時，TCP 撥號優先嘗試 IPv6，失敗時可退回 IPv4。節點明確指定的 IP 偏好優先。需啟用 IPv6，且節點網域能解析 AAAA 記錄。"
+
+msgid "Applies to TCP in the Concord TUN stack."
+msgstr "僅適用於 Concord TUN 網路堆疊中的 TCP。"
+
+msgid "Status unavailable"
+msgstr "狀態查詢失敗"
+
+msgid "Rule sets pending"
+msgstr "規則集尚未就緒"
+
+msgid "Check the core log if rule sets remain unavailable."
+msgstr "規則集長時間未就緒時，請查看核心日誌。"
+
+msgid "Dashboard unavailable"
+msgstr "面板無法使用"
+
+msgid "Core API unavailable"
+msgstr "核心介面無法使用"
+
+msgid "Update installed. Restart the service to apply it."
+msgstr "更新已安裝，重新啟動服務後生效"
+
+msgid "Service action failed"
+msgstr "服務操作失敗"
+
+msgid "Dashboard update failed"
+msgstr "面板更新失敗"
+
+msgid "This setting is not applied by Concord."
+msgstr "此設定對 Concord 無效。"
+
+msgid "Concord always validates the profile before applying it."
+msgstr "Concord 一律會在套用前驗證設定。"
+
+msgid "Concord configuration warnings"
+msgstr "Concord 設定警告"
+
+msgid "See the core log for the full warning report."
+msgstr "完整警告請查看核心日誌。"
+
+msgid "Concord configuration was rejected"
+msgstr "Concord 拒絕了這份設定"
+
+msgid "Concord uses MMDB for GeoIP. DAT selections are ignored."
+msgstr "Concord 使用 MMDB 查詢 GeoIP，DAT 選項不會生效。"
+
+msgid "Concord uses its own TUN stack for all of these legacy stack names."
+msgstr "這些舊堆疊名稱都使用 Concord 自己的 TUN 堆疊。"
+
+msgid "Concord enables Linux TUN GSO when the driver supports it."
+msgstr "Linux 驅動程式支援時，Concord 會啟用 TUN GSO。"
+
+msgid "Check Update"
+msgstr "檢查更新"
+
+msgid "Checking for updates..."
+msgstr "正在檢查更新…"
+
+msgid "Update check failed"
+msgstr "檢查更新失敗"
+
+msgid "Already up to date"
+msgstr "已是最新版本"
+
+msgid "Update available"
+msgstr "發現新版本"
+
+msgid "Upgrade Now"
+msgstr "立即升級"
+
+msgid "View Release"
+msgstr "檢視發佈頁"
+
+msgid "Dismiss"
+msgstr "關閉"
+
+msgid "Starting upgrade..."
+msgstr "正在啟動升級…"
+
+msgid "Checking release metadata..."
+msgstr "正在取得發佈資訊…"
+
+msgid "Downloading package and checksums..."
+msgstr "正在下載安裝包與校驗檔…"
+
+msgid "Verifying SHA256 checksum..."
+msgstr "正在校驗 SHA256…"
+
+msgid "Installing package..."
+msgstr "正在安裝並清理暫存檔…"
+
+msgid "Upgrade completed"
+msgstr "升級完成，暫存檔已自動清理"
+
+msgid "Upgrade failed"
+msgstr "升級失敗"
+
+msgid "Failed to start upgrade"
+msgstr "啟動升級失敗"
+
+msgid "Reload Page"
+msgstr "重新整理頁面"
+
+msgid "Transparent Proxy with Concord on OpenWrt."
+msgstr "在 OpenWrt 上使用 Concord 進行透明代理"
+
+msgid "Switch to Classic UI"
+msgstr "切換到舊版"
+
+msgid "Switch to Modern UI"
+msgstr "切回新版介面"
+
+msgid "Classic LuCI interface mode is active."
+msgstr "目前正在使用舊版 LuCI 介面。"
+
+msgid "Basic Config"
+msgstr "基礎設定"
+
+msgid "Profile selection, startup & reload policy"
+msgstr "設定檔選擇、啟動與重載策略"
+
+msgid "Process descriptors & memory limits (leave blank for unlimited)"
+msgstr "行程控制碼與記憶體軟/硬上限（留空無限制）"
+
+msgid "Click to expand basic service settings and profile switcher."
+msgstr "點擊展開基礎服務開關與設定檔切換。"
+
+msgid "Configure procd soft/hard limits for open files, processes, heap and stack."
+msgstr "設定 procd 開啟檔案數、行程數、堆積與堆疊的軟/硬上限。"
+
+msgid "Running: Save triggers reload · Stopped: Save only"
+msgstr "執行中儲存將自動重載生效；未執行時僅儲存，點擊卡片右上角圓鈕啟停服務"
+
+msgid "unsaved changes"
+msgstr "項未儲存"
+
+msgid "There are %d unsaved changes"
+msgstr "目前有 %d 項變更尚未儲存"
+
+msgid "Save & Start"
+msgstr "儲存並啟動"
+
+msgid "Starting..."
+msgstr "正在啟動…"
+
+msgid "Stopping..."
+msgstr "正在停止…"
+
+msgid "Reloading..."
+msgstr "正在重載…"
+
+msgid "Restarting..."
+msgstr "正在重啟…"
+
+msgid "Upgrading..."
+msgstr "正在升級…"
+
+msgid "Enabled (click to disable)"
+msgstr "已啟用（點擊停用）"
+
+msgid "Disabled (click to enable)"
+msgstr "未啟用（點擊啟用）"
+
+msgid "No profile added yet. Please add a profile first."
+msgstr "尚未新增設定檔，請先點擊「新增設定」"
+
+msgid "Add Profile"
+msgstr "新增設定"
+
+msgid "Edit Profile"
+msgstr "編輯設定"
+
+msgid "Profile Management"
+msgstr "設定檔"
+
+msgid "Profiles"
+msgstr "個設定"
+
+msgid "Profile Name"
+msgstr "設定名稱"
+
+msgid "Local Profile"
+msgstr "本機設定"
+
+msgid "Remaining"
+msgstr "剩餘"
+
+msgid "Nodes"
+msgstr "節點"
+
+msgid "Rule Sets"
+msgstr "規則集"
+
+msgid "Expire"
+msgstr "到期"
+
+msgid "Never"
+msgstr "長期有效"
+
+msgid "Updated"
+msgstr "更新於"
+
+msgid "Uploaded"
+msgstr "上傳於"
+
+msgid "Not updated yet"
+msgstr "尚未更新"
+
+msgid "Updating..."
+msgstr "正在更新…"
+
+msgid "Update failed"
+msgstr "更新失敗"
+
+msgid "Update failed, check link"
+msgstr "更新失敗 · 請檢查連結"
+
+msgid "Import URL"
+msgstr "連結匯入"
+
+msgid "Upload File"
+msgstr "上傳檔案"
+
+msgid "Advanced Options"
+msgstr "進階選項"
+
+msgid "Select local .yaml or QR code image"
+msgstr "選擇本機 .yaml 或 QR Code 圖片"
+
+msgid "Supports .yaml files or QR screenshots (decoded offline in browser)"
+msgstr "支援 .yaml 設定檔；上傳 QR Code 截圖或拍照將離線辨識連結"
+
+msgid "Scanning QR code..."
+msgstr "正在辨識 QR Code…"
+
+msgid "Decoding locally in your browser..."
+msgstr "正在瀏覽器本機離線解碼…"
+
+msgid "No QR code detected in image"
+msgstr "圖片中未偵測到 QR Code"
+
+msgid "Try a clearer screenshot containing the full QR code"
+msgstr "請更換清晰包含完整 QR Code 的截圖"
+
+msgid "QR code does not contain a valid subscription URL"
+msgstr "已辨識 QR Code，但不是有效的設定連結"
+
+msgid "QR code decoded"
+msgstr "已辨識 QR Code 連結"
+
+msgid "QR decode failed"
+msgstr "QR Code 辨識失敗"
+
+msgid "Please try another image or paste the URL directly"
+msgstr "請更換圖片或直接貼上設定連結"
+
+msgid "Selected:"
+msgstr "已選擇："
+
+msgid "Click Save to upload this YAML profile"
+msgstr "點擊右下角「儲存」上傳至設定列表"
+
+msgid "Uploading YAML profile..."
+msgstr "正在上傳設定檔…"
+
+msgid "Upload succeeded"
+msgstr "上傳成功"
+
+msgid "Upload failed"
+msgstr "上傳失敗"
+
+msgid "Please enter a profile name"
+msgstr "請輸入設定名稱"
+
+msgid "Please enter a subscription URL"
+msgstr "請輸入設定連結"
+
+msgid "Please enter a valid http:// or https:// URL"
+msgstr "請輸入有效的 http:// 或 https:// 網址"
+
+msgid "Saving profile..."
+msgstr "正在儲存設定…"
+
+msgid "Fetching remote profile..."
+msgstr "正在擷取遠端設定…"
+
+msgid "Saved, but initial fetch failed. Please check the URL."
+msgstr "已儲存，但擷取失敗，請檢查連結後重試"
+
+msgid "Profile imported"
+msgstr "設定已匯入"
+
+msgid "Saved"
+msgstr "已儲存"
+
+msgid "Failed"
+msgstr "操作失敗"
+
+msgid "e.g. Main Nodes"
+msgstr "例如：主力節點"
+
+msgid "This will remove the subscription from configuration."
+msgstr "將從設定中移除此訂閱"
+
+msgid "This will remove this local YAML profile file."
+msgstr "將刪除此本機 YAML 設定檔"
+
+msgid "Copy"
+msgstr "複製"
+
+msgid "Copied"
+msgstr "已複製"
+
+msgid "Download"
+msgstr "下載"
+
+msgid "Download Report"
+msgstr "下載報告"
+
+msgid "Expand"
+msgstr "展開詳情"
+
+msgid "Close"
+msgstr "關閉"
+
+msgid "Mute Alert"
+msgstr "靜默提示"
+
+msgid "Mute this alert:"
+msgstr "關閉這條提示："
+
+msgid "Mute 1 Day"
+msgstr "靜默 1 天"
+
+msgid "Mute Permanently"
+msgstr "永久關閉"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "Choose preset"
+msgstr "選擇預設"
+
+msgid "Press Enter to add"
+msgstr "按 Enter 新增…"
+
+msgid "Remove"
+msgstr "移除"
+
+msgid "Auto"
+msgstr "自動"
+
+msgid "Optional"
+msgstr "選填"
+
+msgid "Concord Native TUN Stack"
+msgstr "Concord 自有 TUN 堆疊"
+
+msgid "Start Immediately (sec)"
+msgstr "立即啟動（秒）"
+
+msgid "Wait after boot until network is ready"
+msgstr "開機等待網路就緒後再啟動"
+
+msgid "Restart the core service periodically on the configured Cron schedule"
+msgstr "依設定 Cron 排程定期重啟核心服務"
+
+msgid "Run Concord core only without writing transparent proxy firewall rules"
+msgstr "僅執行 Concord 核心，不寫入透明代理防火牆規則"
+
+msgid "Add Rule"
+msgstr "新增規則"
+
+msgid "Add Rule Provider"
+msgstr "新增規則提供者"
+
+msgid "Edit Rule Provider"
+msgstr "編輯規則提供者"
+
+msgid "No rule providers configured"
+msgstr "暫無規則提供者"
+
+msgid "Open Editor"
+msgstr "前往編輯器"
+
+msgid "Move Up"
+msgstr "上移"
+
+msgid "Move Down"
+msgstr "下移"
+
+msgid "Access control rules for local router processes (matched top-to-bottom)"
+msgstr "路由器本機行程存取控制（由上而下依序比對）"
+
+msgid "Inbound interfaces and per-device access control (matched top-to-bottom)"
+msgstr "入站介面與區網裝置存取控制（由上而下依序比對）"
+
+msgid "User..."
+msgstr "使用者…"
+
+msgid "Group..."
+msgstr "群組…"
+
+msgid "CGroup..."
+msgstr "CGroup…"
+
+msgid "lines"
+msgstr "行"
+
+msgid "Loading..."
+msgstr "載入中…"
+
+msgid "Filter log lines..."
+msgstr "篩選日誌關鍵字…"
+
+msgid "Pause"
+msgstr "暫停"
+
+msgid "Resume"
+msgstr "繼續"
+
+msgid "Paused"
+msgstr "已暫停"
+
+msgid "No matching logs"
+msgstr "無符合日誌"
+
+msgid "Diagnostic Bundle"
+msgstr "診斷包"
+
+msgid "Generating diagnostic bundle..."
+msgstr "正在產生診斷日誌…"
+
+msgid "Diagnostic log downloaded"
+msgstr "診斷日誌已下載"
+
+msgid "Collect system info, UCI config summary, nftables rules and recent logs into debug.log for troubleshooting."
+msgstr "收集系統資訊、UCI 設定摘要、nftables 防火牆規則及近期日誌產生 debug.log，便於排查問題。"
+
+msgid "Clear log files periodically when size exceeds limit"
+msgstr "日誌超過大小上限時依排程自動清空"
+
+msgid "Reset"
+msgstr "重設"
+
+msgid "Save"
+msgstr "儲存"
+
+msgid "Service Running"
+msgstr "服務執行中"
+
+msgid "Service Not Running"
+msgstr "服務未執行"
+
+msgid "Resource Limits"
+msgstr "資源限制"
+
+msgid "RLIMIT · 10 items"
+msgstr "RLIMIT · 10 項"
+
+msgid "Unlimited Traffic"
+msgstr "不限流量"
+
+msgid "Click to expand"
+msgstr "點擊展開"
+
+msgid "Add filter item..."
+msgstr "新增過濾項…"
+
+msgid "Add hijack rule..."
+msgstr "新增劫持位址…"
+
+msgid "Add domain..."
+msgstr "新增網域…"
+
+msgid "Update succeeded"
+msgstr "更新成功"
+
+msgid "Modern UI"
+msgstr "新版介面"
+
+msgid "Default"
+msgstr "預設"
+
+msgid "Configured"
+msgstr "已設定"
+
+msgid "Show Password"
+msgstr "顯示密碼"
+
+msgid "Hide Password"
+msgstr "隱藏密碼"

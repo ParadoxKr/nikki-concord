@@ -1,0 +1,1112 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index e7fffc0..5bee9c9 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -260,6 +260,15 @@ dependencies = [
+  "tokio",
+ ]
+ 
++[[package]]
++name = "arbitrary"
++version = "1.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
++dependencies = [
++ "derive_arbitrary",
++]
++
+ [[package]]
+ name = "arc-swap"
+ version = "1.9.3"
+@@ -1068,16 +1077,22 @@ dependencies = [
+  "http-body-util",
+  "hyper",
+  "hyper-util",
++ "mime_guess",
+  "percent-encoding",
++ "rustls",
++ "rustls-pki-types",
+  "serde",
+  "serde_json",
+  "tempfile",
+  "time",
+  "tokio",
++ "tokio-rustls",
+  "tokio-tungstenite",
+  "tokio-util",
+  "tracing",
+  "tracing-subscriber",
++ "url",
++ "zip",
+ ]
+ 
+ [[package]]
+@@ -1097,6 +1112,7 @@ dependencies = [
+  "log",
+  "serde_json",
+  "tempfile",
++ "tikv-jemallocator",
+  "tokio",
+  "tokio-util",
+  "tracing",
+@@ -1919,6 +1935,17 @@ dependencies = [
+  "serde_core",
+ ]
+ 
++[[package]]
++name = "derive_arbitrary"
++version = "1.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.9",
++]
++
+ [[package]]
+ name = "des"
+ version = "0.9.0"
+@@ -2207,6 +2234,7 @@ checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+ dependencies = [
+  "crc32fast",
+  "miniz_oxide",
++ "zlib-rs",
+ ]
+ 
+ [[package]]
+@@ -5500,6 +5528,26 @@ dependencies = [
+  "cfg-if",
+ ]
+ 
++[[package]]
++name = "tikv-jemalloc-sys"
++version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
++dependencies = [
++ "cc",
++ "libc",
++]
++
++[[package]]
++name = "tikv-jemallocator"
++version = "0.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
++dependencies = [
++ "libc",
++ "tikv-jemalloc-sys",
++]
++
+ [[package]]
+ name = "time"
+ version = "0.3.55"
+@@ -6576,6 +6624,25 @@ dependencies = [
+  "syn 3.0.9",
+ ]
+ 
++[[package]]
++name = "zip"
++version = "6.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "eb2a05c7c36fde6c09b08576c9f7fb4cda705990f73b58fe011abf7dfb24168b"
++dependencies = [
++ "arbitrary",
++ "crc32fast",
++ "flate2",
++ "indexmap",
++ "memchr",
++]
++
++[[package]]
++name = "zlib-rs"
++version = "0.6.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
++
+ [[package]]
+ name = "zmij"
+ version = "1.0.23"
+diff --git a/bins/desktop/Cargo.toml b/bins/desktop/Cargo.toml
+index 5c6988e..0cc9951 100644
+--- a/bins/desktop/Cargo.toml
++++ b/bins/desktop/Cargo.toml
+@@ -38,6 +38,10 @@ concord-test-support = { workspace = true }
+ tokio = { workspace = true, features = ["test-util"] }
+ tempfile = { workspace = true }
+ 
++
++[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
++tikv-jemallocator = { version = "0.6", default-features = false, features = ["disable_initial_exec_tls"] }
++
+ [target.'cfg(unix)'.dependencies]
+ libc = { workspace = true }
+ 
+diff --git a/bins/desktop/src/main.rs b/bins/desktop/src/main.rs
+index 183f25f..b5372b2 100644
+--- a/bins/desktop/src/main.rs
++++ b/bins/desktop/src/main.rs
+@@ -20,6 +20,11 @@ use tokio::runtime::Builder;
+ use tokio_util::sync::CancellationToken;
+ use tracing_subscriber::layer::SubscriberExt;
+ 
++
++#[cfg(all(target_os = "linux", target_env = "musl"))]
++#[global_allocator]
++static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
++
+ const EXIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
+ /// The token and its line end, which the host writes with `writeln`.
+ const TOKEN_LINE_LIMIT: u64 = concord_ipc::TOKEN_LEN as u64 + 2;
+@@ -30,10 +35,26 @@ fn main() -> ExitCode {
+         eprintln!("Arguments error");
+         return ExitCode::FAILURE;
+     };
+-    if concord_platform::is_setuid_elevated() && (first == "-t" || first == "run") {
++    if concord_platform::is_setuid_elevated()
++        && (first == "-t" || first == "run" || first == "--check-openwrt-controller")
++    {
+         eprintln!("[ERROR] standalone modes are disabled when running setuid");
+         return ExitCode::FAILURE;
+     }
++    #[cfg(unix)]
++    if first == "--check-openwrt-controller" {
++        let Some(path) = args.next().filter(|_| args.next().is_none()) else {
++            eprintln!("[ERROR] usage: concord --check-openwrt-controller CONFIG.json");
++            return ExitCode::FAILURE;
++        };
++        return match concord_controller::OpenWrt::load(std::path::Path::new(&path)) {
++            Ok(_) => ExitCode::SUCCESS,
++            Err(message) => {
++                eprintln!("[ERROR] {message}");
++                ExitCode::FAILURE
++            }
++        };
++    }
+     if first == "-t" {
+         return match check::parse(args) {
+             Ok(options) => block_on(|| check::run(options)),
+diff --git a/bins/desktop/src/standalone.rs b/bins/desktop/src/standalone.rs
+index 94ae04e..d49674f 100644
+--- a/bins/desktop/src/standalone.rs
++++ b/bins/desktop/src/standalone.rs
+@@ -74,27 +74,47 @@ fn default_home() -> Option<PathBuf> {
+ }
+ 
+ pub async fn run(control: Arc<Control>, options: Options) -> ExitCode {
+-    let controller_stop = CancellationToken::new();
+-    let controller = tokio::spawn(concord_controller::serve(
+-        Arc::clone(&control),
+-        controller_stop.clone(),
+-    ));
+     let code = match start(&control, &options).await {
+         Ok(home) => {
+-            serve(&control, options.config.as_deref(), &home).await;
+-            ExitCode::SUCCESS
++            let controller_stop = CancellationToken::new();
++            match start_controller(&control, controller_stop.clone()) {
++                Ok(controller) => {
++                    serve(&control, options.config.as_deref(), &home).await;
++                    controller_stop.cancel();
++                    let _ = controller.await;
++                    ExitCode::SUCCESS
++                }
++                Err(message) => {
++                    eprintln!("[ERROR] {message}");
++                    ExitCode::FAILURE
++                }
++            }
+         }
+         Err(message) => {
+             eprintln!("[ERROR] {message}");
+             ExitCode::FAILURE
+         }
+     };
+-    controller_stop.cancel();
+-    let _ = controller.await;
+     super::shut_down(&control).await;
+     code
+ }
+ 
++fn start_controller(
++    control: &Arc<Control>,
++    stop: CancellationToken,
++) -> Result<tokio::task::JoinHandle<()>, String> {
++    #[cfg(unix)]
++    if let Some(path) = std::env::var_os("NIKKIC_CONTROLLER_CONFIG") {
++        let status_socket = std::env::var_os("NIKKIC_STATUS_SOCKET").map(PathBuf::from);
++        return Ok(concord_controller::OpenWrt::load(Path::new(&path))?
++            .spawn(Arc::clone(control), status_socket, stop));
++    }
++    Ok(tokio::spawn(concord_controller::serve(
++        Arc::clone(control),
++        stop,
++    )))
++}
++
+ async fn start(control: &Arc<Control>, options: &Options) -> Result<PathBuf, String> {
+     let home = std::path::absolute(&options.home)
+         .map_err(|err| format!("{}: {err}", options.home.display()))?;
+diff --git a/crates/config/src/raw.rs b/crates/config/src/raw.rs
+index 3be04b0..0047520 100644
+--- a/crates/config/src/raw.rs
++++ b/crates/config/src/raw.rs
+@@ -271,7 +271,6 @@ impl RawConfig {
+                     // Kept, it would return in the overlay as a plain map that no longer reads as a template.
+                     None if doc.anchored.contains(other) => {}
+                     None => {
+-                        raw.report.warn("unknown_key", other, "unknown key");
+                         raw.extra.insert(key, value);
+                     }
+                 },
+@@ -621,7 +620,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn unknown_and_t2_keys_are_kept_and_reported() {
++    fn unsupported_keys_are_reported_and_unknown_top_level_keys_are_kept_silently() {
+         let raw = parse_raw(
+             b"tuic-server:\n  enable: true\nfoo: bar\ntun:\n  enable: true\n  icmp-timeout: 4\n",
+         )
+@@ -637,7 +636,7 @@ mod tests {
+             .map(|w| w.path.as_str())
+             .collect();
+         assert!(paths.contains(&"tuic-server"));
+-        assert!(paths.contains(&"foo"));
++        assert!(!paths.contains(&"foo"));
+         assert!(paths.contains(&"tun.icmp-timeout"));
+     }
+ 
+@@ -657,7 +656,8 @@ mod tests {
+             .iter()
+             .map(|w| w.path.as_str())
+             .collect();
+-        assert_eq!(paths, ["foo"]);
++        assert!(paths.is_empty());
++        assert_eq!(json["foo"], "bar");
+     }
+ 
+     #[test]
+diff --git a/crates/config/tests/templates.rs b/crates/config/tests/templates.rs
+index 2f02a87..b4e98de 100644
+--- a/crates/config/tests/templates.rs
++++ b/crates/config/tests/templates.rs
+@@ -158,15 +158,14 @@ fn a_known_key_that_holds_an_anchor_is_read_as_usual() {
+ }
+ 
+ #[test]
+-fn a_key_that_only_uses_a_template_is_unknown() {
++fn top_level_keys_that_only_use_a_template_are_silent() {
+     let text = "base: &base {type: http, interval: 3600}\ncopy: *base\nmerged: {<<: *base, url: 'https://x'}\n";
+-    for (way, mut warned, config) in every_path(text) {
+-        warned.sort_unstable();
++    for (way, warned, config) in every_path(text) {
+         if way == "inspect" {
+             assert!(config.get("copy").is_some() && config.get("merged").is_some());
+             continue;
+         }
+-        assert_eq!(warned, ["copy", "merged"], "{way}");
++        assert!(warned.is_empty(), "{way} warns: {warned:?}");
+         assert!(config.get("base").is_none(), "{way}");
+     }
+ }
+diff --git a/crates/config/tests/tiers.rs b/crates/config/tests/tiers.rs
+index 7d586b7..c85955a 100644
+--- a/crates/config/tests/tiers.rs
++++ b/crates/config/tests/tiers.rs
+@@ -365,9 +365,16 @@ fn every_unsupported_key_is_warned() {
+             }
+         }
+         let path = path(section, "no-such-key");
++        let expected = if section.is_empty() {
++            Vec::new()
++        } else {
++            vec![(path.clone(), "unknown_key")]
++        };
+         match loaded(&nested(&path, "true")) {
+-            Ok((_, warnings)) if warnings.contains(&(path.clone(), "unknown_key")) => {}
+-            other => failures.push(format!("{path}: not reported unknown ({other:?})")),
++            Ok((_, warnings)) if warnings == expected => {}
++            other => failures.push(format!(
++                "{path}: unexpected unknown key handling ({other:?})"
++            )),
+         }
+     }
+     assert!(failures.is_empty(), "{failures:#?}");
+diff --git a/crates/controller/Cargo.toml b/crates/controller/Cargo.toml
+index 2e0676e..e7c0e13 100644
+--- a/crates/controller/Cargo.toml
++++ b/crates/controller/Cargo.toml
+@@ -21,20 +21,26 @@ futures-util = { workspace = true }
+ http = { workspace = true }
+ http-body-util = { workspace = true }
+ hyper = { workspace = true }
+-hyper-util = { workspace = true }
++hyper-util = { workspace = true, features = ["server-auto"] }
+ percent-encoding = { workspace = true }
+ serde = { workspace = true }
+ serde_json = { workspace = true }
+ time = { workspace = true }
+-tokio = { workspace = true, features = ["net", "rt", "macros", "sync", "time"] }
++tokio = { workspace = true, features = ["net", "rt", "macros", "sync", "time", "fs", "process"] }
+ tokio-tungstenite = { workspace = true }
+-tokio-util = { workspace = true }
++tokio-util = { workspace = true, features = ["io"] }
+ tracing = { workspace = true }
++rustls = { workspace = true }
++rustls-pki-types = { workspace = true }
++tokio-rustls = { workspace = true }
++tempfile = { workspace = true }
++mime_guess = "2"
++url = { workspace = true }
++zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+ 
+ [dev-dependencies]
+ concord-engine = { workspace = true }
+ concord-test-support = { workspace = true }
+-tempfile = { workspace = true }
+ tokio = { workspace = true, features = ["full", "test-util"] }
+ tokio-tungstenite = { workspace = true, features = ["connect"] }
+ tracing-subscriber = { workspace = true }
+diff --git a/crates/controller/src/lib.rs b/crates/controller/src/lib.rs
+index cc4810c..212253f 100644
+--- a/crates/controller/src/lib.rs
++++ b/crates/controller/src/lib.rs
+@@ -4,6 +4,10 @@
+ //! state beyond its listener and the sessions on it.
+ 
+ mod http;
++#[cfg(unix)]
++mod openwrt;
++#[cfg(unix)]
++pub use openwrt::OpenWrt;
+ mod routes;
+ mod shapes;
+ mod stream;
+diff --git a/crates/controller/src/openwrt.rs b/crates/controller/src/openwrt.rs
+new file mode 100644
+index 0000000..8764c9b
+--- /dev/null
++++ b/crates/controller/src/openwrt.rs
+@@ -0,0 +1,669 @@
++//! Dashboard and selection storage for Concord's OpenWrt standalone controller.
++
++use std::collections::BTreeMap;
++use std::io::{self, Read, Write};
++use std::net::IpAddr;
++use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
++use std::path::{Component, Path, PathBuf};
++use std::sync::Arc;
++
++use concord_api::{Control, ControllerCors, Origin};
++use concord_common::Tasks;
++use concord_proto::types::ProxySelectParams;
++use futures_util::StreamExt;
++use http::{Method, Request, Response, StatusCode, header};
++use http_body_util::{BodyExt, StreamBody};
++use hyper::body::{Frame, Incoming};
++use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
++use serde::Deserialize;
++use tokio::{
++    net::{TcpListener, UnixListener, UnixStream},
++    sync::Mutex,
++    time,
++};
++use tokio_rustls::TlsAcceptor;
++use tokio_util::{io::ReaderStream, sync::CancellationToken, task::TaskTracker};
++
++use crate::{http as reply, routes::Routes};
++
++const DOWNLOAD_LIMIT: u64 = 40 << 20;
++const EXTRACT_LIMIT: u64 = 96 << 20;
++
++#[derive(Deserialize)]
++#[serde(rename_all = "PascalCase")]
++struct Settings {
++    listen: String,
++    #[serde(rename = "TLSListen")]
++    tls_listen: String,
++    certificate: String,
++    key: String,
++    secret: String,
++    #[serde(rename = "DashboardURL")]
++    dashboard_url: String,
++    dashboard_name: String,
++    home: PathBuf,
++    dashboard_root: PathBuf,
++    store_selected: bool,
++}
++
++pub struct OpenWrt {
++    config: Settings,
++    tls: Option<TlsAcceptor>,
++    selection: Mutex<BTreeMap<String, String>>,
++    update: Mutex<()>,
++}
++
++impl OpenWrt {
++    pub fn load(file: &Path) -> Result<Self, String> {
++        let data = std::fs::read(file).map_err(|err| err.to_string())?;
++        let mut config: Settings = serde_json::from_slice(&data).map_err(|err| err.to_string())?;
++        if !config.home.is_absolute()
++            || !config.dashboard_root.is_absolute()
++            || config.dashboard_name == "."
++            || config.dashboard_name == ".."
++            || config.dashboard_name.contains(['/', '\\', '?', '#', '%'])
++        {
++            return Err("invalid dashboard configuration".into());
++        }
++        for address in [&mut config.listen, &mut config.tls_listen] {
++            if address.is_empty() {
++                continue;
++            }
++            *address = crate::listen_address(address);
++            let authority: http::uri::Authority = address
++                .parse()
++                .map_err(|_| format!("invalid dashboard listen address {address:?}"))?;
++            let port = authority
++                .port_u16()
++                .filter(|port| *port != 0)
++                .ok_or_else(|| format!("invalid dashboard listen address {address:?}"))?;
++            let host = authority.host().trim_matches(['[', ']']);
++            if host.eq_ignore_ascii_case("localhost") {
++                *address = format!("127.0.0.1:{port}");
++            } else if config.secret.is_empty()
++                && !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
++            {
++                return Err("a dashboard on a non-loopback address requires an API secret".into());
++            }
++        }
++        if !config.listen.is_empty() && config.listen == config.tls_listen {
++            return Err("HTTP and HTTPS dashboard addresses overlap".into());
++        }
++        let tls = if config.tls_listen.is_empty() {
++            None
++        } else {
++            let cert = pem(&config.home, &config.certificate)?;
++            let key = pem(&config.home, &config.key)?;
++            let cert = CertificateDer::pem_slice_iter(&cert)
++                .collect::<Result<Vec<_>, _>>()
++                .map_err(|err| format!("dashboard certificate: {err}"))?;
++            let key = PrivateKeyDer::from_pem_slice(&key)
++                .map_err(|err| format!("dashboard key: {err}"))?;
++            let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
++                rustls::crypto::aws_lc_rs::default_provider(),
++            ))
++            .with_safe_default_protocol_versions()
++            .map_err(|err| err.to_string())?
++            .with_no_client_auth()
++            .with_single_cert(cert, key)
++            .map_err(|err| err.to_string())?;
++            tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
++            Some(TlsAcceptor::from(Arc::new(tls)))
++        };
++        let mut selection = BTreeMap::new();
++        if config.store_selected {
++            match std::fs::read(config.home.join("selections.json")) {
++                Ok(data) => match serde_json::from_slice(&data) {
++                    Ok(saved) => selection = saved,
++                    Err(err) => tracing::warn!("ignoring invalid saved policy selections: {err}"),
++                },
++                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
++                Err(err) => return Err(format!("saved policy selections: {err}")),
++            }
++        }
++        Ok(Self {
++            config,
++            tls,
++            selection: Mutex::new(selection),
++            update: Mutex::new(()),
++        })
++    }
++
++    pub fn spawn(
++        self,
++        control: Arc<Control>,
++        status_socket: Option<PathBuf>,
++        stop: CancellationToken,
++    ) -> tokio::task::JoinHandle<()> {
++        let cors = control.external_controller().borrow().cors.clone();
++        let state = Arc::new(self);
++        tokio::spawn(async move {
++            let tracker = TaskTracker::new();
++            let ended = stop.child_token();
++            let _guard = ended.clone().drop_guard();
++            let sessions = Tasks::current(tracker.clone(), ended.clone());
++            let routes = Arc::new(Routes { control, sessions });
++            let restore = routes.sessions.spawn(state.clone().restore(routes.clone()));
++            tokio::select! {
++                _ = async {
++                    let _ = tokio::join!(
++                        state
++                            .clone()
++                            .serve(&state.config.listen, None, routes.clone(), cors.clone()),
++                        state.clone().serve(
++                            &state.config.tls_listen,
++                            state.tls.clone(),
++                            routes.clone(),
++                            cors
++                        ),
++                        serve_status(status_socket, routes.clone()),
++                    );
++                } => {},
++                () = stop.cancelled() => {},
++            }
++            ended.cancel();
++            restore.abort();
++            tracker.close();
++            tracker.wait().await;
++        })
++    }
++
++    async fn serve(
++        self: Arc<Self>,
++        address: &str,
++        tls: Option<TlsAcceptor>,
++        routes: Arc<Routes>,
++        cors: ControllerCors,
++    ) {
++        if address.is_empty() {
++            return;
++        }
++        let mut reported = false;
++        let listener = loop {
++            match TcpListener::bind(address).await {
++                Ok(listener) => break listener,
++                Err(err) if !reported => {
++                    tracing::warn!("dashboard cannot listen on {address}: {err}; retrying");
++                    reported = true;
++                }
++                Err(_) => {}
++            }
++            time::sleep(time::Duration::from_secs(1)).await;
++        };
++        let cors = Arc::new(cors);
++        loop {
++            let socket = match listener.accept().await {
++                Ok((socket, _)) => socket,
++                Err(err) => {
++                    tracing::warn!("dashboard accept: {err}");
++                    time::sleep(time::Duration::from_millis(100)).await;
++                    continue;
++                }
++            };
++            let (state, conn_routes, tls, cors) =
++                (self.clone(), routes.clone(), tls.clone(), cors.clone());
++            routes.sessions.spawn(async move {
++                if let Some(tls) = tls {
++                    if let Ok(Ok(stream)) =
++                        time::timeout(time::Duration::from_secs(5), tls.accept(socket)).await
++                    {
++                        state.connection(stream, conn_routes, cors).await;
++                    }
++                } else {
++                    state.connection(socket, conn_routes, cors).await;
++                }
++            });
++        }
++    }
++
++    async fn connection<T>(
++        self: Arc<Self>,
++        stream: T,
++        routes: Arc<Routes>,
++        cors: Arc<ControllerCors>,
++    ) where
++        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
++    {
++        use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
++        let service = hyper::service::service_fn(move |request| {
++            let (state, routes, cors) = (self.clone(), routes.clone(), cors.clone());
++            async move {
++                let mut response = state.answer(&routes, &cors, request).await;
++                response.headers_mut().insert(
++                    header::REFERRER_POLICY,
++                    header::HeaderValue::from_static("no-referrer"),
++                );
++                Ok::<_, std::convert::Infallible>(response)
++            }
++        });
++        let mut server = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
++        server
++            .http1()
++            .timer(TokioTimer::new())
++            .header_read_timeout(time::Duration::from_secs(5));
++        let _ = server
++            .serve_connection_with_upgrades(TokioIo::new(stream), service)
++            .await;
++    }
++
++    async fn answer(
++        &self,
++        routes: &Routes,
++        cors: &ControllerCors,
++        mut request: Request<Incoming>,
++    ) -> Response<reply::Body> {
++        match request.uri().path() {
++            path if path == "/ui" || path.starts_with("/ui/") => {
++                return self.dashboard(request).await;
++            }
++            "/upgrade/ui" => {
++                if request.method() != Method::POST {
++                    return reply::empty(StatusCode::METHOD_NOT_ALLOWED);
++                }
++                if !reply::authorized(&self.config.secret, request.headers(), request.uri()) {
++                    return reply::unauthorized();
++                }
++                if request.headers().contains_key(header::ORIGIN) {
++                    return reply::error(StatusCode::FORBIDDEN, "use the LuCI update button");
++                }
++                let _guard = self.update.lock().await;
++                return match self.update_dashboard().await {
++                    Ok(()) => reply::json(&serde_json::json!({ "status": "success" })),
++                    Err(err) => {
++                        tracing::warn!("dashboard update: {err}");
++                        reply::error(StatusCode::BAD_GATEWAY, "dashboard update failed")
++                    }
++                };
++            }
++            "/upgrade/geo" if request.method() == Method::POST => {
++                *request.uri_mut() = http::Uri::from_static("/configs/geo");
++            }
++            _ => {}
++        }
++        if self.config.store_selected && matches!(*request.method(), Method::PUT | Method::DELETE) {
++            let path = reply::segments(request.uri().path());
++            if let [kind, group] = path.as_slice()
++                && kind == "proxies"
++            {
++                let group = group.clone();
++                let remove = request.method() == Method::DELETE;
++                let mut saved = self.selection.lock().await;
++                let response = crate::answer(routes, &self.config.secret, cors, request).await;
++                if response.status().is_success() {
++                    let mut next = saved.clone();
++                    if remove {
++                        next.remove(&group);
++                    } else if let Some(name) = routes.control.selections().remove(&group) {
++                        next.insert(group, name);
++                    }
++                    if *saved != next {
++                        if let Err(err) = save(&self.config.home, &next) {
++                            tracing::warn!("saving policy selections: {err}");
++                            return reply::error(
++                                StatusCode::INTERNAL_SERVER_ERROR,
++                                "could not save policy selection",
++                            );
++                        }
++                        *saved = next;
++                    }
++                }
++                return response;
++            }
++        }
++        crate::answer(routes, &self.config.secret, cors, request).await
++    }
++
++    async fn restore(self: Arc<Self>, routes: Arc<Routes>) {
++        let mut pending = self.selection.lock().await.clone();
++        let restore = async {
++            while !pending.is_empty() {
++                for (group, name) in pending.clone() {
++                    let saved = self.selection.lock().await;
++                    if saved.get(&group) != Some(&name)
++                        || routes
++                            .control
++                            .proxy_select_as(
++                                Origin::Controller,
++                                ProxySelectParams {
++                                    group: group.clone(),
++                                    proxy: name,
++                                },
++                            )
++                            .await
++                            .is_ok()
++                    {
++                        pending.remove(&group);
++                    }
++                }
++                if !pending.is_empty() {
++                    time::sleep(time::Duration::from_millis(500)).await;
++                }
++            }
++        };
++        if time::timeout(time::Duration::from_secs(30), restore)
++            .await
++            .is_err()
++        {
++            tracing::warn!("could not restore all saved policy selections");
++        }
++    }
++
++    async fn dashboard(&self, request: Request<Incoming>) -> Response<reply::Body> {
++        if !matches!(*request.method(), Method::GET | Method::HEAD) {
++            return reply::empty(StatusCode::METHOD_NOT_ALLOWED);
++        }
++        let name = &self.config.dashboard_name;
++        let prefix = if name.is_empty() {
++            "/ui/".to_string()
++        } else {
++            format!("/ui/{name}/")
++        };
++        let path = request.uri().path();
++        if path == "/ui"
++            || path == prefix.trim_end_matches('/')
++            || (path == "/ui/" && !name.is_empty())
++        {
++            let location = request
++                .uri()
++                .query()
++                .map_or(prefix.clone(), |query| format!("{prefix}?{query}"));
++            let mut response = reply::empty(StatusCode::TEMPORARY_REDIRECT);
++            if let Ok(value) = header::HeaderValue::from_str(&location) {
++                response.headers_mut().insert(header::LOCATION, value);
++            }
++            return response;
++        }
++        let Some(path) = path.strip_prefix(&prefix) else {
++            return reply::not_found();
++        };
++        let path = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
++        let path = if path.is_empty() {
++            Path::new("index.html")
++        } else {
++            Path::new(path.as_ref())
++        };
++        if !path
++            .components()
++            .all(|part| matches!(part, Component::Normal(_)))
++        {
++            return reply::not_found();
++        }
++        let current = self.config.home.join("dashboard/current");
++        let root = if tokio::fs::metadata(current.join("index.html"))
++            .await
++            .is_ok()
++        {
++            &current
++        } else {
++            &self.config.dashboard_root
++        };
++        let Ok(root) = tokio::fs::canonicalize(root).await else {
++            return reply::not_found();
++        };
++        let Ok(file) = tokio::fs::canonicalize(root.join(path)).await else {
++            return reply::not_found();
++        };
++        if !file.starts_with(&root) {
++            return reply::not_found();
++        }
++        let Ok(metadata) = tokio::fs::metadata(&file).await else {
++            return reply::not_found();
++        };
++        if !metadata.is_file() {
++            return reply::not_found();
++        }
++        let body = if request.method() == Method::HEAD {
++            reply::full(bytes::Bytes::new())
++        } else {
++            let Ok(file) = tokio::fs::File::open(&file).await else {
++                return reply::not_found();
++            };
++            let frames = ReaderStream::new(file)
++                .filter_map(|chunk| async { chunk.ok().map(|bytes| Ok(Frame::data(bytes))) });
++            BodyExt::boxed_unsync(StreamBody::new(frames))
++        };
++        let mime = mime_guess::from_path(path).first_or_octet_stream();
++        Response::builder()
++            .header(header::CONTENT_TYPE, mime.as_ref())
++            .header(header::CONTENT_LENGTH, metadata.len())
++            .body(body)
++            .unwrap_or_else(|_| reply::not_found())
++    }
++
++    async fn update_dashboard(&self) -> Result<(), String> {
++        let source = url::Url::parse(&self.config.dashboard_url).map_err(|err| err.to_string())?;
++        if source.scheme() != "https"
++            || source.host().is_none()
++            || !source.username().is_empty()
++            || source.password().is_some()
++        {
++            return Err("dashboard source must be an HTTPS URL without credentials".into());
++        }
++        let root = self.config.home.join("dashboard");
++        std::fs::create_dir_all(&root).map_err(|err| err.to_string())?;
++        let archive = tempfile::NamedTempFile::new_in(&root).map_err(|err| err.to_string())?;
++        let result = tokio::process::Command::new("curl")
++            .kill_on_drop(true)
++            .args([
++                "--disable",
++                "--noproxy",
++                "*",
++                "--silent",
++                "--fail",
++                "--location",
++                "--proto",
++                "=https",
++                "--proto-redir",
++                "=https",
++                "--disallow-username-in-url",
++                "--max-redirs",
++                "9",
++                "--max-time",
++                "35",
++                "--max-filesize",
++                &DOWNLOAD_LIMIT.to_string(),
++                "--write-out",
++                "%{http_code}",
++                "--output",
++            ])
++            .arg(archive.path())
++            .arg(source.as_str())
++            .output()
++            .await
++            .map_err(|err| err.to_string())?;
++        if !result.status.success() || result.stdout != b"200" {
++            return Err("dashboard download failed".into());
++        }
++        tokio::task::spawn_blocking(move || install(archive, &root))
++            .await
++            .map_err(|err| err.to_string())?
++            .map_err(|err| err.to_string())
++    }
++}
++
++struct StatusSocket {
++    path: PathBuf,
++    inode: u64,
++}
++
++impl Drop for StatusSocket {
++    fn drop(&mut self) {
++        if std::fs::symlink_metadata(&self.path)
++            .is_ok_and(|meta| meta.file_type().is_socket() && meta.ino() == self.inode)
++        {
++            let _ = std::fs::remove_file(&self.path);
++        }
++    }
++}
++
++async fn bind_status(path: &Path) -> io::Result<(UnixListener, StatusSocket)> {
++    match std::fs::symlink_metadata(path) {
++        Ok(meta) if meta.file_type().is_socket() => match UnixStream::connect(path).await {
++            Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {
++                std::fs::remove_file(path)?
++            }
++            Ok(_) => {
++                return Err(io::Error::new(
++                    io::ErrorKind::AddrInUse,
++                    "status socket already in use",
++                ));
++            }
++            Err(err) => return Err(err),
++        },
++        Ok(_) => {
++            return Err(io::Error::new(
++                io::ErrorKind::AlreadyExists,
++                "status socket path is occupied",
++            ));
++        }
++        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
++        Err(err) => return Err(err),
++    }
++    let listener = UnixListener::bind(path)?;
++    let guard = StatusSocket {
++        path: path.to_owned(),
++        inode: std::fs::symlink_metadata(path)?.ino(),
++    };
++    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
++    Ok((listener, guard))
++}
++
++async fn serve_status(path: Option<PathBuf>, routes: Arc<Routes>) {
++    use hyper_util::rt::{TokioIo, TokioTimer};
++    let Some(path) = path else { return };
++    let (listener, _socket) = match bind_status(&path).await {
++        Ok(bound) => bound,
++        Err(err) => {
++            tracing::warn!("could not start local rule status socket: {err}");
++            return;
++        }
++    };
++    loop {
++        let socket = match listener.accept().await {
++            Ok((socket, _)) => socket,
++            Err(err) => {
++                tracing::warn!("local rule status accept: {err}");
++                time::sleep(time::Duration::from_millis(100)).await;
++                continue;
++            }
++        };
++        let conn_routes = routes.clone();
++        routes.sessions.spawn(async move {
++            let service = hyper::service::service_fn(move |request: Request<Incoming>| {
++                let routes = conn_routes.clone();
++                async move {
++                    let response = if request.method() == Method::GET
++                        && request.uri().path() == "/providers/rules"
++                    {
++                        routes.handle(request).await
++                    } else {
++                        reply::not_found()
++                    };
++                    Ok::<_, std::convert::Infallible>(response)
++                }
++            });
++            let mut server = hyper::server::conn::http1::Builder::new();
++            server
++                .timer(TokioTimer::new())
++                .header_read_timeout(time::Duration::from_secs(2))
++                .keep_alive(false);
++            let _ = time::timeout(
++                time::Duration::from_secs(2),
++                server.serve_connection(TokioIo::new(socket), service),
++            )
++            .await;
++        });
++    }
++}
++
++fn pem(home: &Path, value: &str) -> Result<Vec<u8>, String> {
++    if value.starts_with("-----BEGIN ") {
++        Ok(value.as_bytes().to_vec())
++    } else if value.is_empty() {
++        Err("dashboard TLS needs a certificate and private key".into())
++    } else {
++        std::fs::read(home.join(value)).map_err(|err| format!("dashboard TLS file: {err}"))
++    }
++}
++
++fn save(home: &Path, selection: &BTreeMap<String, String>) -> io::Result<()> {
++    let mut file = tempfile::NamedTempFile::new_in(home)?;
++    serde_json::to_writer(&mut file, selection)?;
++    file.flush()?;
++    file.persist(home.join("selections.json"))?;
++    Ok(())
++}
++
++fn install(archive: tempfile::NamedTempFile, root: &Path) -> io::Result<()> {
++    if archive.as_file().metadata()?.len() > DOWNLOAD_LIMIT {
++        return Err(io::Error::other("dashboard download too large"));
++    }
++    let mut zip = zip::ZipArchive::new(archive.reopen()?)?;
++    if zip.len() > 4096 {
++        return Err(io::Error::other("too many dashboard files"));
++    }
++    let release = tempfile::Builder::new()
++        .prefix("release-")
++        .tempdir_in(root)?;
++    let mut index = None::<PathBuf>;
++    let mut remaining = EXTRACT_LIMIT;
++    for id in 0..zip.len() {
++        let mut entry = zip.by_index(id)?;
++        let path = entry
++            .enclosed_name()
++            .filter(|path| {
++                !entry.name().contains('\\')
++                    && path
++                        .components()
++                        .all(|part| matches!(part, Component::Normal(_)))
++            })
++            .ok_or_else(|| io::Error::other("unsafe dashboard archive path"))?;
++        let target = release.path().join(&path);
++        if entry.is_dir() {
++            std::fs::create_dir_all(target)?;
++            continue;
++        }
++        let size = entry.size();
++        if !entry.is_file() || size > remaining {
++            return Err(io::Error::other("invalid dashboard archive entry"));
++        }
++        std::fs::create_dir_all(target.parent().expect("entry within release directory"))?;
++        let mut file = std::fs::File::create_new(target)?;
++        if io::copy(&mut entry.by_ref().take(size + 1), &mut file)? != size {
++            return Err(io::Error::other("dashboard file size mismatch"));
++        }
++        remaining -= size;
++        if path.file_name().is_some_and(|name| name == "index.html") {
++            let parent = path.parent().unwrap_or(Path::new(""));
++            if index
++                .as_ref()
++                .is_none_or(|old| parent.components().count() < old.components().count())
++            {
++                index = Some(parent.to_owned());
++            }
++        }
++    }
++    let index = index.ok_or_else(|| io::Error::other("dashboard archive has no index.html"))?;
++    let link = release.path().join(".current");
++    let target = Path::new(
++        release
++            .path()
++            .file_name()
++            .expect("release directory has a name"),
++    )
++    .join(index);
++    let current = root.join("current");
++    let previous = std::fs::read_link(&current).ok();
++    std::os::unix::fs::symlink(&target, &link)?;
++    std::fs::rename(link, current)?;
++    let _ = release.keep();
++    if let Some(Component::Normal(old)) = previous
++        .as_deref()
++        .and_then(|path| path.components().next())
++        && old.to_string_lossy().starts_with("release-")
++        && target.components().next() != Some(Component::Normal(old))
++    {
++        let _ = std::fs::remove_dir_all(root.join(old));
++    }
++    Ok(())
++}
+diff --git a/crates/platform/src/mem.rs b/crates/platform/src/mem.rs
+index 14f72b1..55746d0 100644
+--- a/crates/platform/src/mem.rs
++++ b/crates/platform/src/mem.rs
+@@ -63,6 +63,28 @@ pub fn resident_memory() -> u64 {
+ }
+ 
+ pub fn release_free_memory() {
++    #[cfg(all(target_os = "linux", target_env = "musl"))]
++    {
++        unsafe extern "C" {
++            fn _rjem_mallctl(
++                name: *const libc::c_char,
++                oldp: *mut libc::c_void,
++                oldlenp: *mut libc::size_t,
++                newp: *mut libc::c_void,
++                newlen: libc::size_t,
++            ) -> libc::c_int;
++        }
++        // SAFETY: `arena.4096.purge` (`MALLCTL_ARENAS_ALL`) purges all arenas without output pointers.
++        unsafe {
++            _rjem_mallctl(
++                c"arena.4096.purge".as_ptr(),
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                0,
++            );
++        }
++    }
+     #[cfg(target_vendor = "apple")]
+     {
+         unsafe extern "C" {
+diff --git a/docs/compatibility.md b/docs/compatibility.md
+index 35ee2a0..c516a55 100644
+--- a/docs/compatibility.md
++++ b/docs/compatibility.md
+@@ -22,10 +22,10 @@ stable `code` and are returned by
+ widen exposure are never ignored silently, and keys that name a server's identity (`fingerprint`, `certificate`,
+ `reality-opts`) are never dropped while the node keeps working.
+ 
+-A top-level, `dns`, `tun`, `sniffer`, `ntp`, `geox-url` or `profile` key that mihomo does not have is ignored with an
+-`unknown_key` warning, where mihomo ignores it silently. A key whose value defines a YAML anchor, such as
++Unknown top-level keys are ignored silently, as in mihomo. Unknown keys inside `dns`, `tun`, `sniffer`, `ntp`,
++`geox-url` and `profile` still produce an `unknown_key` warning. A key whose value defines a YAML anchor, such as
+ `rule-anchor:` holding `domain: &domain {...}` for rule providers to merge, is a template and is ignored silently, as in
+-mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
++mihomo.
+ 
+ ## Deliberate Differences
+ 

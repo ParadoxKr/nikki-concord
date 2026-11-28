@@ -1,0 +1,1556 @@
+diff --git a/bins/desktop/src/check.rs b/bins/desktop/src/check.rs
+index 11cfe3d..cfeabc2 100644
+--- a/bins/desktop/src/check.rs
++++ b/bins/desktop/src/check.rs
+@@ -1,14 +1,15 @@
+ //! `concord -t -c <file>`: loads a profile without running it and prints, as JSON, what applying
+ //! it would warn about. Exits 0 when it loads and 1 when it does not, as mihomo's `-t`.
+ 
+-use std::process::ExitCode;
++use std::{path::PathBuf, process::ExitCode};
+ 
+ use serde_json::json;
+ 
+ pub const USAGE: &str = "\
+-Usage: concord -t -c <file> [--android]
++Usage: concord -t -c <file> [--home <directory>] [--android]
+ 
+   -c, --config <file>  The Clash profile to check
++      --home <dir>    Check provider paths against this working directory
+       --android        Check it as the Android build loads it
+ 
+ Prints {\"warnings\": [{\"level\", \"code\", \"path\", \"message\"}]} when the profile loads,
+@@ -18,28 +19,34 @@ or {\"error\": \"...\"} and exit status 1 when it does not.
+ #[derive(Debug, PartialEq)]
+ pub struct Options {
+     pub config: String,
++    pub home: Option<PathBuf>,
+     pub android: bool,
+ }
+ 
+ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, &'static str> {
+     let mut config = None;
++    let mut home = None;
+     let mut android = false;
+     let mut args = args.into_iter();
+     while let Some(arg) = args.next() {
+         match arg.as_str() {
+             "-c" | "--config" => config = Some(args.next().ok_or("-c needs a value")?),
++            "--home" => home = Some(args.next().ok_or("--home needs a value")?.into()),
+             "--android" => android = true,
+             _ => return Err("an argument -t does not take"),
+         }
+     }
+     Ok(Options {
+         config: config.ok_or("-t needs -c <file>")?,
++        home,
+         android,
+     })
+ }
+ 
+ pub async fn run(options: Options) -> ExitCode {
+-    match concord_engine::ops::check_config(options.config, options.android).await {
++    match concord_engine::ops::check_config_in_home(options.config, options.android, options.home)
++        .await
++    {
+         Ok(warnings) => {
+             println!("{}", json!({ "warnings": warnings }));
+             ExitCode::SUCCESS
+@@ -65,6 +72,7 @@ mod tests {
+             parse(args(&["-c", "a.yaml", "--android"])),
+             Ok(Options {
+                 config: "a.yaml".into(),
++                home: None,
+                 android: true
+             })
+         );
+diff --git a/bins/desktop/src/standalone.rs b/bins/desktop/src/standalone.rs
+index efdcd62..94ae04e 100644
+--- a/bins/desktop/src/standalone.rs
++++ b/bins/desktop/src/standalone.rs
+@@ -20,6 +20,7 @@ Usage: concord run [-c <file>] [-d <directory>]
+   -c, -f, --config <file>     The Clash profile to run [default: <directory>/config.yaml]
+   -d, --directory <directory> Home of the working config, geo data and provider caches
+                               [default: ~/.config/concord]
++      --selections-file <path> Read saved policy selections before starting.
+   -h, --help                  Print this help
+ 
+ The profile is copied to <directory>/config.yaml, which the core owns. SIGHUP re-reads it.
+@@ -37,17 +38,20 @@ pub enum Command {
+ pub struct Options {
+     pub config: Option<PathBuf>,
+     pub home: PathBuf,
++    pub selections_file: Option<PathBuf>,
+ }
+ 
+ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> {
+     let mut config = None;
+     let mut home = None;
++    let mut selections_file = None;
+     let mut args = args.into_iter();
+     while let Some(arg) = args.next() {
+         let slot = match arg.as_str() {
+             "-h" | "--help" => return Ok(Command::Help),
+             "-c" | "-f" | "--config" => &mut config,
+             "-d" | "--directory" => &mut home,
++            "--selections-file" => &mut selections_file,
+             _ => return Err(format!("unexpected argument {arg}")),
+         };
+         let value = args.next().ok_or_else(|| format!("{arg} needs a value"))?;
+@@ -57,7 +61,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String>
+         Some(home) => home,
+         None => default_home().ok_or("no home directory is known; pass -d")?,
+     };
+-    Ok(Command::Run(Options { config, home }))
++    Ok(Command::Run(Options {
++        config,
++        home,
++        selections_file,
++    }))
+ }
+ 
+ fn default_home() -> Option<PathBuf> {
+@@ -100,7 +108,18 @@ async fn start(control: &Arc<Control>, options: &Options) -> Result<PathBuf, Str
+         })
+         .await
+         .map_err(|err| err.to_string())?;
+-    load(control, options.config.as_deref(), &home).await?;
++    let mut selection = control.selections();
++    if let Some(path) = &options.selections_file {
++        match std::fs::read(path) {
++            Ok(bytes) => match serde_json::from_slice(&bytes) {
++                Ok(saved) => selection = saved,
++                Err(err) => eprintln!("[WARNING] ignored invalid saved policy selections: {err}"),
++            },
++            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
++            Err(err) => eprintln!("[WARNING] could not read saved policy selections: {err}"),
++        }
++    }
++    load(control, options.config.as_deref(), &home, selection).await?;
+     control
+         .engine_start(Empty {})
+         .await
+@@ -110,7 +129,12 @@ async fn start(control: &Arc<Control>, options: &Options) -> Result<PathBuf, Str
+ 
+ /// Checks the profile before it replaces the working copy, so a bad edit followed by SIGHUP
+ /// leaves the running config alone.
+-async fn load(control: &Control, config: Option<&Path>, home: &Path) -> Result<(), String> {
++async fn load(
++    control: &Control,
++    config: Option<&Path>,
++    home: &Path,
++    selection: std::collections::BTreeMap<String, String>,
++) -> Result<(), String> {
+     let working = home.join(CONFIG_FILE);
+     let source = match config {
+         Some(config) => {
+@@ -138,7 +162,7 @@ async fn load(control: &Control, config: Option<&Path>, home: &Path) -> Result<(
+         .config_apply(ConfigApplyParams {
+             profile: None,
+             overlay: None,
+-            selection: control.selections(),
++            selection,
+             options: Default::default(),
+             host: None,
+         })
+@@ -166,7 +190,7 @@ async fn serve(control: &Control, config: Option<&Path>, home: &Path) {
+         tokio::select! {
+             () = &mut terminated => return,
+             () = hangup.recv() => {
+-                match load(control, config, home).await {
++                match load(control, config, home, control.selections()).await {
+                     Ok(()) => eprintln!("[INFO] reloaded the config"),
+                     Err(message) => eprintln!("[ERROR] reload: {message}"),
+                 }
+@@ -254,11 +278,13 @@ mod tests {
+         let expected = Command::Run(Options {
+             config: Some(PathBuf::from("a.yaml")),
+             home: PathBuf::from("home"),
++            selections_file: None,
+         });
+         assert_eq!(parse_args(&["-c", "a.yaml", "-d", "home"]), Ok(expected));
+         let expected = Command::Run(Options {
+             config: Some(PathBuf::from("a.yaml")),
+             home: PathBuf::from("home"),
++            selections_file: None,
+         });
+         assert_eq!(
+             parse_args(&["--directory", "home", "--config", "a.yaml"]),
+@@ -270,6 +296,19 @@ mod tests {
+         assert_eq!(options.config, Some(PathBuf::from("a.yaml")));
+     }
+ 
++    #[test]
++    fn standalone_accepts_a_selections_file() {
++        let Command::Run(options) =
++            parse_args(&["-d", "home", "--selections-file", "selections.json"]).unwrap()
++        else {
++            panic!("expected run");
++        };
++        assert_eq!(
++            options.selections_file,
++            Some(PathBuf::from("selections.json"))
++        );
++    }
++
+     #[test]
+     fn help_wins_and_unknown_or_dangling_arguments_are_refused() {
+         assert_eq!(parse_args(&["-c", "a.yaml", "-h"]), Ok(Command::Help));
+diff --git a/bins/desktop/tests/standalone.rs b/bins/desktop/tests/standalone.rs
+index 06d8530..f3823ea 100644
+--- a/bins/desktop/tests/standalone.rs
++++ b/bins/desktop/tests/standalone.rs
+@@ -33,13 +33,13 @@ fn serve_once(listener: TcpListener) -> std::thread::JoinHandle<()> {
+     })
+ }
+ 
+-fn spawn_run(config: &Path, home: &Path) -> Child {
+-    Command::new(BINARY)
+-        .arg("run")
+-        .arg("-c")
+-        .arg(config)
+-        .arg("-d")
+-        .arg(home)
++fn spawn_run(config: &Path, home: &Path, selections: Option<&Path>) -> Child {
++    let mut command = Command::new(BINARY);
++    command.arg("run").arg("-c").arg(config).arg("-d").arg(home);
++    if let Some(path) = selections {
++        command.arg("--selections-file").arg(path);
++    }
++    command
+         .stdin(Stdio::null())
+         .stdout(Stdio::null())
+         .stderr(Stdio::piped())
+@@ -86,7 +86,7 @@ fn stderr_of(child: &mut Child) -> String {
+ }
+ 
+ #[test]
+-fn run_proxies_through_the_profiles_mixed_listener_and_stops_on_sigterm() {
++fn run_uses_the_saved_policy_on_the_first_request_and_stops_on_sigterm() {
+     let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+     let origin_port = origin.local_addr().unwrap().port();
+     let served = serve_once(origin);
+@@ -96,11 +96,13 @@ fn run_proxies_through_the_profiles_mixed_listener_and_stops_on_sigterm() {
+     let config = profiles.path().join("profile.yaml");
+     std::fs::write(
+         &config,
+-        format!("mixed-port: {mixed}\nallow-lan: false\nmode: rule\nlog-level: info\nrules:\n  - MATCH,DIRECT\n"),
++        format!("mixed-port: {mixed}\nallow-lan: false\nmode: rule\nlog-level: info\nproxy-groups:\n  - name: test-policy\n    type: select\n    proxies: [REJECT, DIRECT]\nrules:\n  - MATCH,test-policy\n"),
+     )
+     .unwrap();
+ 
+-    let mut child = spawn_run(&config, home.path());
++    let selections = home.path().join("selections.json");
++    std::fs::write(&selections, r#"{"test-policy":"DIRECT"}"#).unwrap();
++    let mut child = spawn_run(&config, home.path(), Some(&selections));
+     let mut client = connect_within(mixed, &mut child, Duration::from_secs(20));
+     write!(
+         client,
+@@ -109,15 +111,14 @@ fn run_proxies_through_the_profiles_mixed_listener_and_stops_on_sigterm() {
+     .unwrap();
+     let mut reply = String::new();
+     client.read_to_string(&mut reply).unwrap();
+-    served.join().unwrap();
+-
+     // SAFETY: the pid is of a child this test spawned and has not reaped.
+     #[allow(unsafe_code, reason = "kill has no safe std wrapper")]
+     let signalled = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+     let status = exit_within(&mut child, Duration::from_secs(8));
+     let stderr = stderr_of(&mut child);
+ 
+-    assert!(reply.ends_with(BODY), "{reply}");
++    assert!(reply.ends_with(BODY), "{reply}\n{stderr}");
++    served.join().unwrap();
+     assert_eq!(signalled, 0);
+     assert_eq!(status.and_then(|status| status.code()), Some(0), "{stderr}");
+     assert!(home.path().join("config.yaml").exists());
+@@ -129,7 +130,7 @@ fn run_refuses_a_profile_it_cannot_load_and_exits_with_one() {
+     let config = home.path().join("broken.yaml");
+     std::fs::write(&config, "mixed-port: [not a port\n").unwrap();
+ 
+-    let mut child = spawn_run(&config, home.path());
++    let mut child = spawn_run(&config, home.path(), None);
+     let status = exit_within(&mut child, Duration::from_secs(20));
+     let stderr = stderr_of(&mut child);
+ 
+@@ -137,3 +138,42 @@ fn run_refuses_a_profile_it_cannot_load_and_exits_with_one() {
+     assert!(stderr.contains("broken.yaml"), "{stderr}");
+     assert!(!home.path().join("config.yaml").exists());
+ }
++
++#[test]
++fn preflight_checks_provider_paths_against_the_live_home() {
++    let home = tempfile::tempdir().unwrap();
++    let candidate = tempfile::tempdir().unwrap();
++    let config = candidate.path().join("config.yaml");
++    std::os::unix::fs::symlink(candidate.path(), home.path().join("linked")).unwrap();
++    let check = |yaml: &str| {
++        std::fs::write(&config, yaml).unwrap();
++        let result = Command::new(BINARY)
++            .arg("-t")
++            .arg("-c")
++            .arg(&config)
++            .arg("--home")
++            .arg(home.path())
++            .output()
++            .unwrap();
++        let output = String::from_utf8(result.stdout).unwrap();
++        (result.status, output)
++    };
++    let (status, output) = check(
++        "rule-providers:\n  local:\n    type: file\n    behavior: domain\n    path: ../outside.yaml\nrules: ['MATCH,DIRECT']\n",
++    );
++    assert!(
++        !status.success() && output.contains("rule-providers.local.path"),
++        "{output}"
++    );
++    let (status, output) = check(
++        "proxy-providers:\n  local:\n    type: file\n    path: linked/nodes.yaml\nrules: ['MATCH,DIRECT']\n",
++    );
++    assert!(
++        !status.success() && output.contains("path crosses a symlink"),
++        "{output}"
++    );
++    let (status, output) = check(
++        "rule-providers:\n  remote:\n    type: http\n    behavior: ipcidr\n    format: mrs\n    url: https://example.invalid/cn.mrs\n    path: null\nrules: ['MATCH,DIRECT']\n",
++    );
++    assert!(status.success(), "{output}");
++}
+diff --git a/crates/api/src/control/provider.rs b/crates/api/src/control/provider.rs
+index 3d7c0bf..59a321e 100644
+--- a/crates/api/src/control/provider.rs
++++ b/crates/api/src/control/provider.rs
+@@ -80,6 +80,14 @@ impl Control {
+         })
+     }
+ 
++    pub fn controller_rules(&self) -> Vec<concord_engine::RuleView> {
++        self.engine.rules()
++    }
++
++    pub fn set_disabled_rules(&self, changes: impl IntoIterator<Item = (usize, bool)>) {
++        self.engine.set_disabled_rules(changes);
++    }
++
+     pub(super) async fn rule_set_dump(
+         &self,
+         params: RuleSetDumpParams,
+diff --git a/crates/api/src/lib.rs b/crates/api/src/lib.rs
+index 50f678f..5b41ec5 100644
+--- a/crates/api/src/lib.rs
++++ b/crates/api/src/lib.rs
+@@ -12,7 +12,7 @@ mod watch;
+ 
+ pub use bus::EventBus;
+ pub use concord_common::Origin;
+-pub use concord_engine::ControllerCors;
++pub use concord_engine::{ControllerCors, RuleView};
+ pub use control::{Control, ControlOptions, ControllerSettings, Reload, valid_status_ranges};
+ #[cfg(unix)]
+ pub use fds::AdoptedFds;
+diff --git a/crates/common/src/outbound.rs b/crates/common/src/outbound.rs
+index 997428b..145287f 100644
+--- a/crates/common/src/outbound.rs
++++ b/crates/common/src/outbound.rs
+@@ -233,6 +233,7 @@ pub struct DialEnv {
+     /// A node's own value overrides these.
+     pub sock_opts: SockOpts,
+     pub tcp_concurrent: bool,
++    pub proxy_tcp_ipv6_prefer: bool,
+     pub ipv6: bool,
+ }
+ 
+diff --git a/crates/config/src/general.rs b/crates/config/src/general.rs
+index 9e272dd..bc6956a 100644
+--- a/crates/config/src/general.rs
++++ b/crates/config/src/general.rs
+@@ -62,6 +62,7 @@ pub struct General {
+     pub log_level: LogLevel,
+     pub ipv6: bool,
+     pub tcp_concurrent: bool,
++    pub proxy_tcp_ipv6_prefer: bool,
+     pub unified_delay: bool,
+     pub find_process_mode: FindProcessMode,
+     pub interface_name: String,
+@@ -95,6 +96,7 @@ impl Default for General {
+             log_level: LogLevel::Info,
+             ipv6: true,
+             tcp_concurrent: false,
++            proxy_tcp_ipv6_prefer: false,
+             unified_delay: false,
+             find_process_mode: FindProcessMode::Strict,
+             interface_name: String::new(),
+@@ -185,6 +187,7 @@ impl General {
+         }
+         general.ipv6 = f.opt_bool("ipv6")?.unwrap_or(true);
+         general.tcp_concurrent = f.boolean("tcp-concurrent")?;
++        general.proxy_tcp_ipv6_prefer = f.boolean("nikkic-proxy-tcp-ipv6-prefer")?;
+         general.unified_delay = f.boolean("unified-delay")?;
+         general.interface_name = f.string("interface-name")?;
+         general.routing_mark = f.mark("routing-mark")?;
+diff --git a/crates/config/src/keys.rs b/crates/config/src/keys.rs
+index c31a2e3..91815f6 100644
+--- a/crates/config/src/keys.rs
++++ b/crates/config/src/keys.rs
+@@ -147,6 +147,7 @@ pub const TOP_T0: &[&str] = &[
+     "ipv6",
+     "unified-delay",
+     "tcp-concurrent",
++    "nikkic-proxy-tcp-ipv6-prefer",
+     "find-process-mode",
+     "interface-name",
+     "routing-mark",
+diff --git a/crates/config/tests/tiers.rs b/crates/config/tests/tiers.rs
+index a6ef9c3..7d586b7 100644
+--- a/crates/config/tests/tiers.rs
++++ b/crates/config/tests/tiers.rs
+@@ -37,6 +37,10 @@ const SAMPLES: &[(&str, &str)] = &[
+     ("ipv6", "ipv6: false"),
+     ("unified-delay", "unified-delay: true"),
+     ("tcp-concurrent", "tcp-concurrent: true"),
++    (
++        "nikkic-proxy-tcp-ipv6-prefer",
++        "nikkic-proxy-tcp-ipv6-prefer: true",
++    ),
+     ("find-process-mode", "find-process-mode: always"),
+     ("interface-name", "interface-name: en9"),
+     ("routing-mark", "routing-mark: 6666"),
+diff --git a/crates/controller/src/routes.rs b/crates/controller/src/routes.rs
+index 48dc96b..13cc33a 100644
+--- a/crates/controller/src/routes.rs
++++ b/crates/controller/src/routes.rs
+@@ -38,6 +38,7 @@ impl Routes {
+                 json(&json!({ "hello": self.control.info().server.implementation }))
+             }
+             (&Method::GET, ["version"]) => json(&json!({
++                "implementation": "concord",
+                 "meta": true,
+                 "version": format!("v{}", self.control.info().server.version),
+             })),
+@@ -53,7 +54,8 @@ impl Routes {
+             (_, ["configs", ..]) => self.configs(request, &method, &path[1..]).await,
+             (_, ["proxies", rest @ ..]) => self.proxies(request, &method, rest).await,
+             (&Method::GET, ["group", rest @ ..]) => self.groups(request, rest).await,
+-            (&Method::GET, ["rules"]) => self.rules().await,
++            (&Method::GET, ["rules"]) => json(&shapes::rules(&self.control.controller_rules())),
++            (&Method::PATCH, ["rules", "disable"]) => self.disable_rules(request).await,
+             (_, ["connections", rest @ ..]) => self.connections(request, &method, rest).await,
+             (_, ["providers", "proxies", rest @ ..]) => {
+                 self.proxy_providers(request, &method, rest).await
+@@ -70,8 +72,7 @@ impl Routes {
+                 empty(StatusCode::NO_CONTENT)
+             }
+             (&Method::GET, ["dns", "query"]) => self.dns_query(&request).await,
+-            (_, ["restart" | "upgrade" | "debug" | "storage" | "ui", ..])
+-            | (&Method::PATCH, ["rules", "disable"]) => unsupported(),
++            (_, ["restart" | "upgrade" | "debug" | "storage" | "ui", ..]) => unsupported(),
+             (
+                 _,
+                 []
+@@ -276,7 +277,7 @@ impl Routes {
+             proxies: members,
+             url: query(request.uri(), "url"),
+             timeout: Some(timeout),
+-            concurrency: None,
++            concurrency: Some(10),
+             expected,
+             watch: Default::default(),
+         };
+@@ -300,11 +301,26 @@ impl Routes {
+         json(&delays)
+     }
+ 
+-    async fn rules(&self) -> Response<Body> {
+-        match self.control.rule_list(Empty {}).await {
+-            Ok(list) => json(&shapes::rules(&list.rules)),
+-            Err(_) => json(&json!({ "rules": [] })),
++    async fn disable_rules(&self, request: Request<Incoming>) -> Response<Body> {
++        if self.control.host_owned() {
++            return unsupported();
+         }
++        let Some(changes) = read_json(request)
++            .await
++            .and_then(|value| serde_json::from_value::<Option<HashMap<i64, bool>>>(value).ok())
++        else {
++            return bad_request();
++        };
++        self.control
++            .set_disabled_rules(
++                changes
++                    .into_iter()
++                    .flatten()
++                    .filter_map(|(index, disabled)| {
++                        usize::try_from(index).ok().map(|index| (index, disabled))
++                    }),
++            );
++        empty(StatusCode::NO_CONTENT)
+     }
+ 
+     async fn connections(
+diff --git a/crates/controller/src/shapes.rs b/crates/controller/src/shapes.rs
+index 4c2500d..ed40262 100644
+--- a/crates/controller/src/shapes.rs
++++ b/crates/controller/src/shapes.rs
+@@ -2,10 +2,11 @@
+ 
+ use std::collections::HashMap;
+ 
++use concord_api::RuleView;
+ use concord_platform::local_utc_offset;
+ use concord_proto::types::{
+     ConnectionInfo, DelayRecord, DnsQueryResult, DnsRecord, GeneralState, GroupInfo, LogLevel,
+-    NodeInfo, ProviderInfo, ProxyGroups, ProxyState, RuleEntry,
++    NodeInfo, ProviderInfo, ProxyGroups, ProxyState,
+ };
+ use serde_json::{Map, Value, json};
+ use time::format_description::well_known::Rfc3339;
+@@ -256,17 +257,25 @@ pub fn rule_provider(info: &ProviderInfo) -> Value {
+     })
+ }
+ 
+-pub fn rules(rules: &[RuleEntry]) -> Value {
++pub fn rules(rules: &[RuleView]) -> Value {
+     let list: Vec<Value> = rules
+         .iter()
+         .enumerate()
+         .map(|(index, rule)| {
++            let activity = rule.activity;
+             json!({
+                 "index": index,
+                 "type": rule.kind,
+                 "payload": rule.payload,
+                 "proxy": rule.target,
+                 "size": -1,
++                "extra": {
++                    "disabled": activity.disabled,
++                    "hitCount": activity.hit_count,
++                    "hitAt": time(activity.hit_at),
++                    "missCount": activity.miss_count,
++                    "missAt": time(activity.miss_at),
++                },
+             })
+         })
+         .collect();
+diff --git a/crates/controller/tests/routes.rs b/crates/controller/tests/routes.rs
+index 6563b09..26e619c 100644
+--- a/crates/controller/tests/routes.rs
++++ b/crates/controller/tests/routes.rs
+@@ -560,6 +560,75 @@ async fn a_tun_stack_is_neither_reported_nor_refused() {
+     rig.control.shutdown().await;
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn dashboard_can_disable_a_rule_and_observe_real_matches() {
++    let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
++    let destination = origin.local_addr().unwrap();
++    let serve = tokio::spawn(async move {
++        let (mut stream, _) = origin.accept().await.unwrap();
++        let mut request = [0; 256];
++        assert!(stream.read(&mut request).await.unwrap() > 0);
++        stream
++            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nrouted")
++            .await
++            .unwrap();
++    });
++    let proxy = port_to_bind_later();
++    let rig = Rig::with_profile(
++        true,
++        &format!(
++            "mixed-port: {proxy}\nbind-address: 127.0.0.1\nrules:\n  - DOMAIN,other.test,REJECT\n  - DST-PORT,{},REJECT\n  - MATCH,DIRECT\n",
++            destination.port()
++        ),
++    )
++    .await;
++    rig.control.engine_start(Empty {}).await.unwrap();
++    rig.wait_open(proxy).await;
++    let connect = || async {
++        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
++            .await
++            .unwrap();
++        stream
++            .write_all(format!("GET http://{destination}/ HTTP/1.1\r\nHost: {destination}\r\nConnection: close\r\n\r\n").as_bytes())
++            .await.unwrap();
++        let mut reply = Vec::new();
++        let _ = timeout(PATIENCE, stream.read_to_end(&mut reply))
++            .await
++            .unwrap();
++        reply.ends_with(b"routed")
++    };
++    assert!(!connect().await);
++
++    let rules = rig.call("GET", "/rules", None).await.json();
++    assert_eq!(rules["rules"][0]["extra"]["missCount"], 1);
++    assert_eq!(rules["rules"][1]["extra"]["hitCount"], 1);
++    assert_eq!(
++        rig.call("PATCH", "/rules/disable", Some(json!({ "1": true })))
++            .await
++            .status,
++        204
++    );
++    assert!(connect().await);
++    let rules = rig.call("GET", "/rules", None).await.json();
++    assert_eq!(rules["rules"][1]["extra"]["disabled"], true);
++    assert_eq!(rules["rules"][1]["extra"]["hitCount"], 1);
++    assert_eq!(rules["rules"][1]["extra"]["missCount"], 0);
++    assert_eq!(rules["rules"][2]["extra"]["hitCount"], 1);
++    assert_eq!(
++        rig.call("PATCH", "/rules/disable", Some(json!({ "1": false })))
++            .await
++            .status,
++        204
++    );
++    assert!(!connect().await);
++    let rules = rig.call("GET", "/rules", None).await.json();
++    assert_eq!(rules["rules"][1]["extra"]["disabled"], false);
++    assert_eq!(rules["rules"][1]["extra"]["hitCount"], 2);
++    assert_eq!(rules["rules"][2]["extra"]["hitCount"], 1);
++    serve.await.unwrap();
++    rig.control.shutdown().await;
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn rules_connections_and_providers_have_mihomos_shape() {
+     let rig = Rig::new(false).await;
+@@ -569,6 +638,12 @@ async fn rules_connections_and_providers_have_mihomos_shape() {
+     assert_eq!(first["payload"], "example.test");
+     assert_eq!(first["proxy"], "REJECT");
+     assert_eq!(first["size"], -1);
++    assert_eq!(
++        rig.call("PATCH", "/rules/disable", Some(json!({ "0": true })))
++            .await
++            .status,
++        501
++    );
+ 
+     let connections = rig.call("GET", "/connections", None).await.json();
+     for key in ["downloadTotal", "uploadTotal", "connections", "memory"] {
+diff --git a/crates/engine/src/apply.rs b/crates/engine/src/apply.rs
+index ad36031..232fb80 100644
+--- a/crates/engine/src/apply.rs
++++ b/crates/engine/src/apply.rs
+@@ -719,6 +719,7 @@ async fn build_outbounds(
+         let events = shared.events.clone();
+         let opts = opts.clone();
+         let (tcp_concurrent, ipv6) = (profile.general.tcp_concurrent, profile.general.ipv6);
++        let proxy_tcp_ipv6_prefer = profile.general.proxy_tcp_ipv6_prefer;
+         Arc::new(move |nodes: Arc<dyn NodeDialer>| DialEnv {
+             sockets: sockets.clone(),
+             resolver: resolver.clone(),
+@@ -726,6 +727,7 @@ async fn build_outbounds(
+             events: events.clone(),
+             sock_opts: opts.clone(),
+             tcp_concurrent,
++            proxy_tcp_ipv6_prefer,
+             ipv6,
+         })
+     };
+diff --git a/crates/engine/src/engine/views.rs b/crates/engine/src/engine/views.rs
+index 6542dad..2b5236d 100644
+--- a/crates/engine/src/engine/views.rs
++++ b/crates/engine/src/engine/views.rs
+@@ -128,14 +128,28 @@ impl Engine {
+         runtime
+             .program
+             .rules()
+-            .map(|(rule, target)| RuleView {
++            .enumerate()
++            .map(|(index, (rule, target))| RuleView {
+                 kind: rule.type_name.to_string(),
+                 payload: rule.payload.to_string(),
+                 target: target.to_string(),
++                activity: runtime.program.rule_activity(index),
+             })
+             .collect()
+     }
+ 
++    pub fn set_disabled_rules(&self, changes: impl IntoIterator<Item = (usize, bool)>) {
++        if let Some(runtime) = self.runtime() {
++            let mut moved = false;
++            for (index, disabled) in changes {
++                moved |= runtime.program.set_rule_disabled(index, disabled);
++            }
++            if moved {
++                self.route.moved();
++            }
++        }
++    }
++
+     pub fn warnings(&self) -> Vec<WarningView> {
+         (**self.warnings.load()).clone()
+     }
+diff --git a/crates/engine/src/fake_ip_store.rs b/crates/engine/src/fake_ip_store.rs
+index 2e2cd8d..b8ee93d 100644
+--- a/crates/engine/src/fake_ip_store.rs
++++ b/crates/engine/src/fake_ip_store.rs
+@@ -1,7 +1,9 @@
+ use std::collections::HashMap;
++use std::future::Future;
+ use std::io;
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex, Weak};
++use std::time::Duration;
+ 
+ use concord_common::Tasks;
+ use concord_common::sync::lock;
+@@ -9,6 +11,20 @@ use concord_dns::{FakeIpPool, Resolver};
+ use concord_platform::HomeDir;
+ use tokio_util::sync::CancellationToken;
+ 
++const SAVE_DELAY: Duration = Duration::from_secs(30);
++
++async fn wait_for_save(stop: &CancellationToken, changed: impl Future<Output = ()>) -> bool {
++    tokio::select! {
++        biased;
++        () = stop.cancelled() => true,
++        () = changed => tokio::select! {
++            biased;
++            () = stop.cancelled() => true,
++            () = tokio::time::sleep(SAVE_DELAY) => false,
++        },
++    }
++}
++
+ /// The `store-fake-ip` files of the engine, written by every config's saver in turn. A write
+ /// holds the store from its snapshot to the rename, so the snapshot that lands last is the
+ /// newest. A change counts as saved only once its write succeeds; a failed one is written
+@@ -112,14 +128,11 @@ pub(crate) fn start(
+ ) {
+     let generation = store.begin();
+     lock(&store.files).saver = Some((generation, Arc::downgrade(&dns)));
+-    // mihomo writes each mapping as it is made. One write at a time takes in every mapping made
+-    // while the last one ran, so a burst costs as many writes as the disk can take.
++    // Batch writes to protect router flash. Start the window on the first change so a busy
++    // resolver cannot keep postponing the save. A normal stop still saves pending mappings.
+     let saver = async move {
+         loop {
+-            let stopped = tokio::select! {
+-                () = stop.cancelled() => true,
+-                () = dns.fake_ip_changed() => false,
+-            };
++            let stopped = wait_for_save(&stop, dns.fake_ip_changed()).await;
+             let (store, home, dns) = (store.clone(), home.clone(), dns.clone());
+             let _ = tokio::task::spawn_blocking(move || store.save(generation, &home, &dns)).await;
+             if stopped {
+@@ -148,6 +161,44 @@ mod tests {
+         FakeIpPool::new(IpCidr::parse(cidr).unwrap()).unwrap()
+     }
+ 
++    #[tokio::test(start_paused = true)]
++    async fn a_busy_pool_has_a_bounded_write_window() {
++        let stop = CancellationToken::new();
++        let pool = pool("198.18.0.1/16");
++        pool.lookup("first.test");
++        let ready = wait_for_save(&stop, pool.changed());
++        tokio::pin!(ready);
++        assert!(
++            tokio::time::timeout(Duration::from_secs(20), &mut ready)
++                .await
++                .is_err()
++        );
++        pool.lookup("later.test");
++        assert!(
++            !tokio::time::timeout(Duration::from_secs(11), ready)
++                .await
++                .unwrap()
++        );
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn stopping_interrupts_the_batch_window() {
++        let stop = CancellationToken::new();
++        let ready = wait_for_save(&stop, std::future::ready(()));
++        tokio::pin!(ready);
++        assert!(
++            tokio::time::timeout(Duration::from_secs(1), &mut ready)
++                .await
++                .is_err()
++        );
++        stop.cancel();
++        assert!(
++            tokio::time::timeout(Duration::from_secs(1), ready)
++                .await
++                .unwrap()
++        );
++    }
++
+     #[derive(Clone, Default)]
+     struct Disk(Arc<Mutex<HashMap<String, Vec<u8>>>>);
+ 
+diff --git a/crates/engine/src/ntp.rs b/crates/engine/src/ntp.rs
+index 244381f..ed6834f 100644
+--- a/crates/engine/src/ntp.rs
++++ b/crates/engine/src/ntp.rs
+@@ -373,6 +373,7 @@ mod tests {
+             events: Arc::new(NullSink),
+             sock_opts: SockOpts::default(),
+             tcp_concurrent: false,
++            proxy_tcp_ipv6_prefer: false,
+             ipv6: true,
+         })
+     }
+diff --git a/crates/engine/src/ops.rs b/crates/engine/src/ops.rs
+index b2873cc..7197cc4 100644
+--- a/crates/engine/src/ops.rs
++++ b/crates/engine/src/ops.rs
+@@ -2,6 +2,7 @@ use std::any::Any;
+ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+ use std::path::{Path, PathBuf};
+ 
++use concord_config::provider::{ProxySource, RuleSource};
+ use concord_config::proxy::ProxyParse;
+ use concord_config::{
+     LoadOptions, Map, crypt, filter, load_raw, parse_proxy, parse_raw, share_link,
+@@ -76,6 +77,15 @@ pub async fn validate_config(path: String) -> Result<Option<String>, Failure> {
+ /// Loads the profile at `path` as an apply would and returns what that apply would warn about,
+ /// without running anything.
+ pub async fn check_config(path: String, android: bool) -> Result<Vec<WarningView>, Failure> {
++    check_config_in_home(path, android, None).await
++}
++
++/// Also checks explicitly configured provider paths against the runtime home.
++pub async fn check_config_in_home(
++    path: String,
++    android: bool,
++    home: Option<PathBuf>,
++) -> Result<Vec<WarningView>, Failure> {
+     on_parse_stack(move || {
+         let raw = parse_raw(&read_file(&path)?).map_err(Failure::Config)?;
+         let options = LoadOptions {
+@@ -84,6 +94,32 @@ pub async fn check_config(path: String, android: bool) -> Result<Vec<WarningView
+             ..LoadOptions::default()
+         };
+         let profile = load_raw(raw, &options).map_err(Failure::Config)?;
++        if let Some(root) = home {
++            let home = HomeDir::new(root);
++            let proxy_paths = profile.proxy_providers.iter().filter_map(|provider| {
++                let path = match &provider.source {
++                    ProxySource::File { path } => path,
++                    ProxySource::Http(http) if !http.path.is_empty() => &http.path,
++                    _ => return None,
++                };
++                Some(("proxy-providers", &provider.name, path))
++            });
++            let rule_paths = profile.rule_providers.iter().filter_map(|provider| {
++                let path = match &provider.source {
++                    RuleSource::File { path } => path,
++                    RuleSource::Http(http) if !http.path.is_empty() => &http.path,
++                    _ => return None,
++                };
++                Some(("rule-providers", &provider.name, path))
++            });
++            for (section, name, path) in proxy_paths.chain(rule_paths) {
++                home.confine(path).map_err(|err| {
++                    Failure::ConfigRejected(format!(
++                        "{section}.{name}.path ({path}): {err}. Use a path inside the Concord home."
++                    ))
++                })?;
++            }
++        }
+         Ok(crate::views::warning_views(&profile, android))
+     })
+     .await?
+diff --git a/crates/engine/src/resources/rule_providers.rs b/crates/engine/src/resources/rule_providers.rs
+index 93e3ce3..06200e2 100644
+--- a/crates/engine/src/resources/rule_providers.rs
++++ b/crates/engine/src/resources/rule_providers.rs
+@@ -291,12 +291,11 @@ impl RuleProviders {
+                 .await
+                 .and_then(|meta| meta.modified())
+                 .ok();
+-            let loaded = self.load_buf(provider, bytes, false).await;
+-            if let Some(at) = modified {
+-                provider.remember(None, at);
+-            }
+-            match loaded {
++            match self.load_buf(provider, bytes, false).await {
+                 Ok(_) => {
++                    if let Some(at) = modified {
++                        provider.remember(None, at);
++                    }
+                     let interval = Duration::from_secs(u64::from(provider.def.interval));
+                     return Ok(provider.since_update() > interval);
+                 }
+diff --git a/crates/engine/src/views.rs b/crates/engine/src/views.rs
+index 15404c4..6b32bf8 100644
+--- a/crates/engine/src/views.rs
++++ b/crates/engine/src/views.rs
+@@ -98,6 +98,7 @@ pub struct RuleView {
+     pub kind: String,
+     pub payload: String,
+     pub target: String,
++    pub activity: concord_rules::RuleActivity,
+ }
+ 
+ #[derive(Clone, Debug, Serialize)]
+diff --git a/crates/engine/tests/e2e.rs b/crates/engine/tests/e2e.rs
+index 52f1883..9f80012 100644
+--- a/crates/engine/tests/e2e.rs
++++ b/crates/engine/tests/e2e.rs
+@@ -2052,6 +2052,24 @@ async fn a_rule_provider_reports_every_fetch_whatever_started_it() {
+     rig.engine.shutdown().await;
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn empty_mrs_cache_does_not_mark_provider_loaded() {
++    let rig = Rig::new();
++    std::fs::write(rig.home.path().join("r.mrs"), []).unwrap();
++    rig.apply(
++        "rule-providers:\n  local: {type: file, behavior: ipcidr, format: mrs, path: r.mrs}\n\
++         rules:\n  - RULE-SET,local,REJECT\n  - MATCH,DIRECT\n",
++    )
++    .await
++    .unwrap();
++    assert!(eventually(|| rig.events.phases("local").len() == 2).await);
++    let phases = rig.events.phases("local");
++    assert!(matches!(&phases[1], ResourcePhase::Failed(_)));
++    let view = rig.engine.providers().get("local").unwrap();
++    assert_eq!(view.update_at, "0001-01-01T00:00:00Z");
++    rig.engine.shutdown().await;
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn a_rule_provider_update_and_side_load_from_a_caller_are_reported() {
+     let rig = Rig::new();
+diff --git a/crates/group/src/tests/mod.rs b/crates/group/src/tests/mod.rs
+index 750f8ec..53cf670 100644
+--- a/crates/group/src/tests/mod.rs
++++ b/crates/group/src/tests/mod.rs
+@@ -412,6 +412,7 @@ impl Rig {
+                 events: env_events.clone(),
+                 sock_opts: SockOpts::default(),
+                 tcp_concurrent: false,
++                proxy_tcp_ipv6_prefer: false,
+                 ipv6: true,
+             }),
+             fetcher: fetcher.clone(),
+diff --git a/crates/net/src/test_support.rs b/crates/net/src/test_support.rs
+index 8ceb68d..d994e48 100644
+--- a/crates/net/src/test_support.rs
++++ b/crates/net/src/test_support.rs
+@@ -157,6 +157,7 @@ pub fn env(
+         events: Arc::new(NullSink),
+         sock_opts: SockOpts::default(),
+         tcp_concurrent,
++        proxy_tcp_ipv6_prefer: false,
+         ipv6,
+     }
+ }
+diff --git a/crates/proxy/src/node.rs b/crates/proxy/src/node.rs
+index bb492b2..4db4da8 100644
+--- a/crates/proxy/src/node.rs
++++ b/crates/proxy/src/node.rs
+@@ -96,7 +96,13 @@ impl Egress {
+             return cx.env.nodes.dial_via(via, &inner, server).await;
+         }
+         let proxy_cx = DialCx::new(cx.env, Initiator::Proxy, cx.deadline);
+-        let stream = dial_stream(&proxy_cx, server, self.version, &self.sock_opts(cx.env)).await?;
++        let version =
++            if self.version == IpVersion::Dual && cx.env.ipv6 && cx.env.proxy_tcp_ipv6_prefer {
++                IpVersion::Ipv6Prefer
++            } else {
++                self.version
++            };
++        let stream = dial_stream(&proxy_cx, server, version, &self.sock_opts(cx.env)).await?;
+         cx.mark(ConnStep::Connected);
+         Ok(stream)
+     }
+diff --git a/crates/proxy/src/testing.rs b/crates/proxy/src/testing.rs
+index 48a3c5e..c26f9fc 100644
+--- a/crates/proxy/src/testing.rs
++++ b/crates/proxy/src/testing.rs
+@@ -327,6 +327,7 @@ pub(crate) fn test_env_with(nodes: Arc<dyn NodeDialer>) -> DialEnv {
+         events: Arc::new(NullSink),
+         sock_opts: SockOpts::default(),
+         tcp_concurrent: false,
++        proxy_tcp_ipv6_prefer: false,
+         ipv6: true,
+     }
+ }
+diff --git a/crates/proxy/tests/interop.rs b/crates/proxy/tests/interop.rs
+index f7df12d..be77363 100644
+--- a/crates/proxy/tests/interop.rs
++++ b/crates/proxy/tests/interop.rs
+@@ -166,6 +166,7 @@ fn env() -> DialEnv {
+         events: Arc::new(NullSink),
+         sock_opts: SockOpts::default(),
+         tcp_concurrent: false,
++        proxy_tcp_ipv6_prefer: false,
+         ipv6: true,
+     }
+ }
+diff --git a/crates/rules/src/activity.rs b/crates/rules/src/activity.rs
+new file mode 100644
+index 0000000..d726941
+--- /dev/null
++++ b/crates/rules/src/activity.rs
+@@ -0,0 +1,109 @@
++use std::ops::Range;
++use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
++use std::time::{SystemTime, UNIX_EPOCH};
++
++#[derive(Clone, Copy, Debug, Default)]
++pub struct RuleActivity {
++    pub disabled: bool,
++    pub hit_count: u64,
++    pub hit_at: i64,
++    pub miss_count: u64,
++    pub miss_at: i64,
++}
++
++#[derive(Default)]
++struct Counter {
++    count: AtomicU64,
++    at: AtomicI64,
++}
++
++impl Counter {
++    fn note(&self, at: i64) {
++        self.at.fetch_max(at, Relaxed);
++        self.count.fetch_add(1, Relaxed);
++    }
++}
++
++#[derive(Default)]
++struct Activity {
++    disabled: AtomicBool,
++    hit: Counter,
++    miss: Counter,
++}
++
++pub(crate) struct Activities {
++    rules: Box<[Activity]>,
++    disabling_used: AtomicBool,
++}
++
++impl Activities {
++    pub(crate) fn new(len: usize) -> Self {
++        Self {
++            rules: (0..len).map(|_| Activity::default()).collect(),
++            disabling_used: AtomicBool::new(false),
++        }
++    }
++
++    pub(crate) fn heap_bytes(&self) -> usize {
++        std::mem::size_of_val(&*self.rules)
++    }
++
++    pub(crate) fn snapshot(&self, index: usize) -> RuleActivity {
++        self.rules
++            .get(index)
++            .map_or_else(RuleActivity::default, |rule| RuleActivity {
++                disabled: rule.disabled.load(Relaxed),
++                hit_count: rule.hit.count.load(Relaxed),
++                hit_at: rule.hit.at.load(Relaxed),
++                miss_count: rule.miss.count.load(Relaxed),
++                miss_at: rule.miss.at.load(Relaxed),
++            })
++    }
++
++    pub(crate) fn set_disabled(&self, index: usize, disabled: bool) -> bool {
++        let Some(rule) = self.rules.get(index) else {
++            return false;
++        };
++        if disabled {
++            self.disabling_used.store(true, Relaxed);
++        }
++        rule.disabled.swap(disabled, Relaxed) != disabled
++    }
++
++    pub(crate) fn disabled(&self, index: u32) -> bool {
++        self.rules
++            .get(index as usize)
++            .is_some_and(|rule| rule.disabled.load(Relaxed))
++    }
++
++    pub(crate) fn any_enabled(&self, range: Range<u32>) -> bool {
++        !range.is_empty()
++            && (!self.disabling_used.load(Relaxed)
++                || range.into_iter().any(|idx| !self.disabled(idx)))
++    }
++
++    pub(crate) fn hit(&self, index: u32) {
++        if let Some(rule) = self.rules.get(index as usize) {
++            rule.hit.note(now());
++        }
++    }
++
++    pub(crate) fn miss(&self, range: Range<u32>) {
++        let mut at = None;
++        if let Some(rules) = self.rules.get(range.start as usize..range.end as usize) {
++            for rule in rules {
++                if !rule.disabled.load(Relaxed) {
++                    rule.miss.note(*at.get_or_insert_with(now));
++                }
++            }
++        }
++    }
++}
++
++fn now() -> i64 {
++    let millis = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_millis();
++    i64::try_from(millis).unwrap_or(i64::MAX)
++}
+diff --git a/crates/rules/src/compile.rs b/crates/rules/src/compile.rs
+index f114758..c8af7bb 100644
+--- a/crates/rules/src/compile.rs
++++ b/crates/rules/src/compile.rs
+@@ -158,7 +158,9 @@ fn compile_from<D: Borrow<RuleDef>>(
+     }
+     cx.empty_sub = sub_rules.len() as u32;
+     let mut progs = Vec::with_capacity(sub_rules.len() + 2);
+-    progs.push(compile_list(&mut cx, rules, "rules")?);
++    let main = compile_list(&mut cx, rules, "rules")?;
++    let activities = crate::activity::Activities::new(main.table.len());
++    progs.push(main);
+     for (name, list) in sub_rules {
+         let section = format!("sub-rules[{name}]");
+         progs.push(compile_list(&mut cx, list.iter().map(Ok), &section)?);
+@@ -174,6 +176,7 @@ fn compile_from<D: Borrow<RuleDef>>(
+     }
+     Ok(RouteProgram {
+         progs: progs.into_boxed_slice(),
++        activities,
+         sub_rule_names: sub_rules.keys().map(|name| name.as_str().into()).collect(),
+         targets: cx.targets.into_boxed_slice(),
+         rule_sets: cx.rule_sets.into_boxed_slice(),
+diff --git a/crates/rules/src/lib.rs b/crates/rules/src/lib.rs
+index fe8852b..e9e0230 100644
+--- a/crates/rules/src/lib.rs
++++ b/crates/rules/src/lib.rs
+@@ -1,5 +1,6 @@
+ #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+ 
++mod activity;
+ pub mod cidr_set;
+ mod compile;
+ pub mod domain_set;
+@@ -19,6 +20,7 @@ mod runs;
+ mod table;
+ mod text;
+ 
++pub use activity::RuleActivity;
+ pub use kind::RuleKind;
+ pub use observed::Observed;
+ pub use program::{
+diff --git a/crates/rules/src/program.rs b/crates/rules/src/program.rs
+index 91cda75..25dc5a0 100644
+--- a/crates/rules/src/program.rs
++++ b/crates/rules/src/program.rs
+@@ -4,6 +4,7 @@ use std::sync::Arc;
+ use indexmap::IndexMap;
+ use smallvec::SmallVec;
+ 
++use crate::activity::{Activities, RuleActivity};
+ use crate::geo::{GeoError, GeoFile, GeoStore};
+ use crate::kind::RuleKind;
+ use crate::prog::Prog;
+@@ -229,6 +230,7 @@ impl std::error::Error for CompileError {}
+ pub struct RouteProgram {
+     /// Index 0 is the main list, `n + 1` the n-th sub-rule list.
+     pub(crate) progs: Box<[Prog]>,
++    pub(crate) activities: Activities,
+     pub(crate) sub_rule_names: Box<[Box<str>]>,
+     pub(crate) targets: Box<[Box<str>]>,
+     pub(crate) rule_sets: Box<[(Arc<RuleSetHandle>, bool, bool)]>,
+@@ -322,8 +324,17 @@ impl RouteProgram {
+         })
+     }
+ 
++    pub fn rule_activity(&self, index: usize) -> RuleActivity {
++        self.activities.snapshot(index)
++    }
++
++    pub fn set_rule_disabled(&self, index: usize, disabled: bool) -> bool {
++        self.activities.set_disabled(index, disabled)
++    }
++
+     pub fn memory_estimate(&self) -> usize {
+         self.progs.iter().map(Prog::heap_bytes).sum::<usize>()
++            + self.activities.heap_bytes()
+             + self.targets.iter().map(|t| t.len() + 16).sum::<usize>()
+             + self
+                 .sub_rule_names
+diff --git a/crates/rules/src/program_tests.rs b/crates/rules/src/program_tests.rs
+index 53b4e49..38e7403 100644
+--- a/crates/rules/src/program_tests.rs
++++ b/crates/rules/src/program_tests.rs
+@@ -90,6 +90,53 @@ fn first_match_keeps_rule_order_across_runs_and_kinds() {
+     }
+ }
+ 
++#[test]
++fn disabling_a_rule_preserves_order_and_statistics_with_and_without_an_index() {
++    let kit = Kit::new();
++    let lines = [
++        "DOMAIN,other.test,MISS",
++        "DOMAIN,example.test,FIRST",
++        "DOMAIN-SUFFIX,example.test,SECOND",
++        "MATCH,FINAL",
++    ];
++    for merge in MERGES {
++        let program = kit.compile(&lines, merge);
++        let flow = Flow::domain("example.test");
++        assert_eq!(accepted(&kit, &program, &flow), pick(1, "FIRST"));
++        program.set_rule_disabled(1, true);
++        assert_eq!(accepted(&kit, &program, &flow), pick(2, "SECOND"));
++        assert_eq!(program.rule_activity(0).miss_count, 2);
++        assert_eq!(program.rule_activity(1).hit_count, 1);
++        assert_eq!(program.rule_activity(1).miss_count, 0);
++        assert_eq!(program.rule_activity(2).hit_count, 1);
++        program.set_rule_disabled(1, false);
++        assert_eq!(accepted(&kit, &program, &flow), pick(1, "FIRST"));
++    }
++}
++
++#[test]
++fn disabled_ip_rules_do_not_trigger_dns_or_count_as_misses() {
++    let kit = Kit::new();
++    for merge in MERGES {
++        let program = kit.compile(
++            &[
++                "IP-CIDR,10.0.0.0/8,A",
++                "IP-CIDR,20.0.0.0/8,B",
++                "MATCH,FINAL",
++            ],
++            merge,
++        );
++        assert!(program.set_rule_disabled(0, true));
++        assert!(program.set_rule_disabled(1, true));
++        let flow = resolving("example.test", "10.0.0.1");
++        let trace = drive(&program, &kit.geo, &flow, true);
++        assert_eq!(trace.accepted, pick(2, "FINAL"));
++        assert_eq!(trace.ip_lookups, 0);
++        assert_eq!(program.rule_activity(0).miss_count, 0);
++        assert_eq!(program.rule_activity(1).miss_count, 0);
++    }
++}
++
+ #[test]
+ fn skip_continues_inside_a_merged_run() {
+     let kit = Kit::new();
+diff --git a/crates/rules/src/run.rs b/crates/rules/src/run.rs
+index c2a6a23..df30012 100644
+--- a/crates/rules/src/run.rs
++++ b/crates/rules/src/run.rs
+@@ -1,11 +1,11 @@
+ use concord_common::{FlowMeta, RouteState};
+ use smallvec::SmallVec;
+ 
++use crate::activity::Activities;
+ use crate::eval::{Ev, Node, Yield};
+ use crate::observed::Observed;
+-use crate::prog::{Op, host_holds};
++use crate::prog::{Op, Prog, host_holds};
+ use crate::program::{MatchCtx, RouteProgram, RuleRef, Step};
+-use crate::runs::{IpRun, UrlRun};
+ 
+ #[derive(Clone, Copy, Debug, Default)]
+ pub(crate) struct Frame {
+@@ -20,19 +20,9 @@ enum Advance {
+     Pos(u32),
+ }
+ 
+-/// A run's rule that holds is a candidate; if it is passed, the run goes on after it.
+-fn run_candidate<'p>(found: Option<u32>) -> Outcome<'p> {
+-    match found {
+-        Some(idx) => Outcome::Candidate {
+-            idx,
+-            advance: Advance::Pos(idx + 1),
+-        },
+-        None => Outcome::Next,
+-    }
+-}
+-
+ enum Outcome<'p> {
+     Next,
++    NextAt(u32),
+     Enter { sub: u32, from: u32 },
+     Candidate { idx: u32, advance: Advance },
+     Yield(Step<'p>),
+@@ -122,68 +112,14 @@ impl<'p> Run<'p> {
+                 std::mem::take(&mut self.replay),
+                 std::mem::take(&mut self.observed),
+             );
+-            let mut miss_end = None;
+-            let outcome = match *op {
+-                Op::Leaf { idx, node } => match prog.nodes.get(node as usize) {
+-                    None => Outcome::Next,
+-                    Some(node) => match ev.eval(node) {
+-                        Ok(false) => self.passed_over(&ev),
+-                        Ok(true) => match node {
+-                            Node::SubRule { sub, .. } => Outcome::Enter {
+-                                sub: *sub,
+-                                from: idx,
+-                            },
+-                            _ => Outcome::Candidate {
+-                                idx,
+-                                advance: Advance::Leaf,
+-                            },
+-                        },
+-                        Err(why) => Outcome::Yield(self.yielded(why)),
+-                    },
+-                },
+-                Op::Host { idx, how, extended } => {
+-                    if prog
+-                        .table
+-                        .payload(idx)
+-                        .is_some_and(|payload| host_holds(&ev, how, extended, payload))
+-                    {
+-                        Outcome::Candidate {
+-                            idx,
+-                            advance: Advance::Leaf,
+-                        }
+-                    } else {
+-                        Outcome::Next
+-                    }
+-                }
+-                Op::Domain(run) => match prog.domain_runs.get(run as usize) {
+-                    None => Outcome::Next,
+-                    Some(run) => {
+-                        miss_end = Some(run.end);
+-                        run_candidate(run.next_in(&ev, frame.pos, &prog.table))
+-                    }
+-                },
+-                Op::Url(run) => match prog.url_runs.get(run as usize) {
+-                    None => Outcome::Next,
+-                    Some(run) => {
+-                        miss_end = Some(run.end);
+-                        self.url_run(run, &ev, frame.pos)
+-                    }
+-                },
+-                Op::Ip(run) => match prog.ip_runs.get(run as usize) {
+-                    None => Outcome::Next,
+-                    Some(run) => {
+-                        miss_end = Some(run.end);
+-                        self.ip_run(run, &mut ev, frame.pos)
+-                    }
+-                },
+-            };
++            let outcome = self.evaluate_op(op, prog, frame, &mut ev);
+             self.observed = ev.observed;
+             match outcome {
+                 Outcome::Yield(step) => return step,
+-                Outcome::Next => {
++                Outcome::Next | Outcome::NextAt(_) => {
+                     if let Some(top) = self.frames.last_mut() {
+                         top.op += 1;
+-                        if let Some(end) = miss_end {
++                        if let Outcome::NextAt(end) = outcome {
+                             top.pos = end;
+                         }
+                     }
+@@ -214,6 +150,114 @@ impl<'p> Run<'p> {
+         }
+     }
+ 
++    fn evaluate_op(&mut self, op: &Op, prog: &Prog, frame: Frame, ev: &mut Ev<'_>) -> Outcome<'p> {
++        let activities = (frame.prog == 0).then_some(&self.program.activities);
++        match *op {
++            Op::Leaf { idx, node } => {
++                if activities.is_some_and(|activity| activity.disabled(idx)) {
++                    return Outcome::Next;
++                }
++                let Some(node) = prog.nodes.get(node as usize) else {
++                    return Outcome::Next;
++                };
++                match ev.eval(node) {
++                    Ok(false) => {
++                        if let Some(activity) = activities {
++                            activity.miss(idx..idx + 1);
++                        }
++                        self.passed_over(ev)
++                    }
++                    Ok(true) => {
++                        if let Some(activity) = activities {
++                            activity.hit(idx);
++                        }
++                        match node {
++                            Node::SubRule { sub, .. } => Outcome::Enter {
++                                sub: *sub,
++                                from: idx,
++                            },
++                            _ => Outcome::Candidate {
++                                idx,
++                                advance: Advance::Leaf,
++                            },
++                        }
++                    }
++                    Err(why) => Outcome::Yield(self.yielded(why)),
++                }
++            }
++            Op::Host { idx, how, extended } => {
++                if activities.is_some_and(|activity| activity.disabled(idx)) {
++                    return Outcome::Next;
++                }
++                if prog
++                    .table
++                    .payload(idx)
++                    .is_some_and(|payload| host_holds(ev, how, extended, payload))
++                {
++                    if let Some(activity) = activities {
++                        activity.hit(idx);
++                    }
++                    Outcome::Candidate {
++                        idx,
++                        advance: Advance::Leaf,
++                    }
++                } else {
++                    if let Some(activity) = activities {
++                        activity.miss(idx..idx + 1);
++                    }
++                    Outcome::Next
++                }
++            }
++            Op::Domain(run) => {
++                let Some(run) = prog.domain_runs.get(run as usize) else {
++                    return Outcome::Next;
++                };
++                indexed(activities, frame.pos.max(run.start), run.end, |from| {
++                    run.next_in(ev, from, &prog.table)
++                })
++            }
++            Op::Url(run) => {
++                let Some(run) = prog.url_runs.get(run as usize) else {
++                    return Outcome::Next;
++                };
++                let from = frame.pos.max(run.start);
++                if activities.is_some_and(|activity| !activity.any_enabled(from..run.end)) {
++                    return Outcome::NextAt(run.end);
++                }
++                let Some(http) = &ev.state.http else {
++                    if let Some(activity) = activities {
++                        activity.miss(from..run.end);
++                    }
++                    self.http_pending = true;
++                    return Outcome::NextAt(run.end);
++                };
++                indexed(activities, from, run.end, |start| {
++                    run.next_from(&http.url, start)
++                })
++            }
++            Op::Ip(run) => {
++                let Some(run) = prog.ip_runs.get(run as usize) else {
++                    return Outcome::Next;
++                };
++                let from = frame.pos.max(run.start);
++                if activities.is_some_and(|activity| !activity.any_enabled(from..run.end)) {
++                    return Outcome::NextAt(run.end);
++                }
++                let ip = if run.src {
++                    Ok(ev.src_ip())
++                } else {
++                    ev.dst_ip(run.resolves)
++                };
++                match ip {
++                    Err(why) => Outcome::Yield(self.yielded(why)),
++                    Ok(ip) => indexed(activities, from, run.end, |start| {
++                        ip.and_then(|ip| run.next_from(ip, start))
++                    }),
++                }
++            }
++        }
++    }
++
+     fn rule_ref(&self, index: u32) -> RuleRef {
+         RuleRef(
+             if self.frames.len() > 1 {
+@@ -225,28 +269,6 @@ impl<'p> Run<'p> {
+         )
+     }
+ 
+-    /// The first rule of `run` at or after `pos` that holds; without the request every rule
+-    /// of it is undecided.
+-    fn url_run(&mut self, run: &UrlRun, ev: &Ev<'_>, pos: u32) -> Outcome<'p> {
+-        let Some(http) = &ev.state.http else {
+-            self.http_pending = true;
+-            return Outcome::Next;
+-        };
+-        run_candidate(run.next_from(&http.url, pos))
+-    }
+-
+-    fn ip_run(&mut self, run: &IpRun, ev: &mut Ev<'_>, pos: u32) -> Outcome<'p> {
+-        let ip = if run.src {
+-            Ok(ev.src_ip())
+-        } else {
+-            ev.dst_ip(run.resolves)
+-        };
+-        match ip {
+-            Err(why) => Outcome::Yield(self.yielded(why)),
+-            Ok(ip) => run_candidate(ip.and_then(|ip| run.next_from(ip, pos))),
+-        }
+-    }
+-
+     fn yielded(&mut self, why: Yield) -> Step<'p> {
+         match why {
+             Yield::Ip(counted) => {
+@@ -293,3 +315,33 @@ impl<'p> Run<'p> {
+         self.advance_top();
+     }
+ }
++
++fn indexed<'p>(
++    activities: Option<&Activities>,
++    from: u32,
++    end: u32,
++    mut find: impl FnMut(u32) -> Option<u32>,
++) -> Outcome<'p> {
++    let mut start = from;
++    let matched = loop {
++        match find(start) {
++            Some(index) if activities.is_some_and(|activity| activity.disabled(index)) => {
++                start = index + 1;
++            }
++            matched => break matched,
++        }
++    };
++    if let Some(activity) = activities {
++        activity.miss(from..matched.unwrap_or(end));
++        if let Some(index) = matched {
++            activity.hit(index);
++        }
++    }
++    match matched {
++        Some(idx) => Outcome::Candidate {
++            idx,
++            advance: Advance::Pos(idx + 1),
++        },
++        None => Outcome::NextAt(end),
++    }
++}
+diff --git a/docs/compatibility.md b/docs/compatibility.md
+index a480704..35ee2a0 100644
+--- a/docs/compatibility.md
++++ b/docs/compatibility.md
+@@ -127,7 +127,7 @@ Concord serves the Clash REST and WebSocket API, in mihomo's shapes, for dashboa
+ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differences:
+ 
+ - Not served, answered with status 501: `/restart`, `/upgrade` (core, UI and geo), `/debug`, `/storage`, `/ui`
+-  (there is no `external-ui`) and `PATCH /rules/disable`.
++  (there is no `external-ui`).
+ - `PATCH /configs` changes what Concord changes live: `mode`, `log-level`, `ipv6`, `allow-lan`, `bind-address`,
+   `lan-allowed-ips`, `lan-disallowed-ips`, `mixed-port`, `tcp-concurrent`, `find-process-mode` and, when Concord runs
+   on its own, `tun`. A request that names any other setting (ports other than `mixed-port`, `interface-name`,
+@@ -140,7 +140,7 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
+   it.
+ - `/version` reports Concord's version with `meta: true`. Dashboards compare it with mihomo's releases, so they may
+   offer a core update; the update itself answers 501.
+-- `/rules` has no hit counters (`extra`), and `size` is always -1.
++- `/rules` reports match statistics and temporary disable state for the main list. The standalone controller accepts `PATCH /rules/disable`. Statistics and disables reset when the rule program is replaced; `size` is always -1.
+ - The `tun` object of `GET /configs` carries `enable`, `device`, `dns-hijack`, `auto-route`,
+   `auto-detect-interface` and `mtu`, and no `stack`, since Concord has one TUN stack (see TUN below); a
+   `PATCH /configs` ignores any `tun.stack`. Settings Concord does not have keep mihomo's
+diff --git a/schema/config-schema.json b/schema/config-schema.json
+index a3f3277..6d57a29 100644
+--- a/schema/config-schema.json
++++ b/schema/config-schema.json
+@@ -13,6 +13,7 @@
+       "ipv6",
+       "unified-delay",
+       "tcp-concurrent",
++      "nikkic-proxy-tcp-ipv6-prefer",
+       "find-process-mode",
+       "interface-name",
+       "routing-mark",

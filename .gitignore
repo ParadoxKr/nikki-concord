@@ -1,0 +1,5 @@
+.DS_Store
+/build/
+/release/
+*.pyc
+__pycache__/
