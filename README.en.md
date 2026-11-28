@@ -6,13 +6,6 @@
 
 **[简体中文](README.md) · English**
 
-[![Release](https://img.shields.io/github/v/release/user-7392/nikki-concord?include_prereleases&label=Release&color=blue)](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32)
-[![OpenWrt](https://img.shields.io/badge/OpenWrt-25.12%20%7C%2024.10%20%7C%2023.05-00B5E2)](#installation)
-[![Arch](https://img.shields.io/badge/Arch-aarch64%20%7C%20x86__64-555555)](#installation)
-[![License](https://img.shields.io/badge/License-GPL--3.0--or--later-green)](#upstream-projects-and-licenses)
-
-[Disclaimer](#experimental-notice--disclaimer) · [Footprint](#flash-and-memory-usage) · [Installation](#installation) · [Notes](#notes) · [Build](#building-from-source) · [Licenses](#upstream-projects-and-licenses)
-
 </div>
 
 ---
@@ -52,37 +45,6 @@ This package ports [OpenWrt Nikki](https://github.com/nikkinikki-org/OpenWrt-nik
 
 ---
 
-## Installation
-
-- **Supported firmware**: **OpenWrt 25.12.x** (`.apk`), and **OpenWrt / ImmortalWrt 23.05 / 24.10** with `opkg` + `firewall4` (`.ipk`; feeds must provide Go `yq` and `rpcd-mod-ucode`; `iptables / fw3` is unsupported).
-- **Testing note**: Only `.apk` has been tested on physical OpenWrt 25.12 hardware; `.ipk` packages were checked for structure and scripts only. Back up your config before installing.
-
-Check architecture: `cat /etc/apk/arch` (25.12+) or `opkg print-architecture` (23.05 / 24.10).
-
-Download from the [**v0.1.0-r32 release**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32) (checksums in `SHA256SUMS-r32-all`):
-
-| Architecture | OpenWrt 25.12+ (`.apk`) | OpenWrt / ImmortalWrt 23.05 and 24.10 (`.ipk`) |
-| :--- | :--- | :--- |
-| `aarch64_cortex-a53` | `luci-app-nikki-concord-0.1.0-r32.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a53.ipk` |
-| `aarch64_cortex-a72` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a72.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a72.ipk` |
-| `aarch64_generic` | `luci-app-nikki-concord-0.1.0-r32_aarch64_generic.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_generic.ipk` |
-| `x86_64` | `luci-app-nikki-concord-0.1.0-r32_x86_64.apk` | `luci-app-nikki-concord-0.1.0-r32_x86_64.ipk` |
-
-> [!NOTE]
-> For experimental `uselightgbm: true` inference in `smart` groups, see the separate branch release [**v0.1.0-r32-lgbm**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32-lgbm) (the main build already supports heuristic `smart` groups).
-
-Upload to your router and install (disabled by default; enable under **Services → Nikki Concord** after stopping other transparent proxies):
-
-```sh
-# OpenWrt 25.12+ (apk)
-apk add --allow-untrusted ./package.apk
-
-# OpenWrt / ImmortalWrt 23.05 and 24.10 (opkg)
-opkg update && opkg install ./package.ipk
-```
-
----
-
 ## Notes
 
 Full protocol and field list: [Concord compatibility](https://github.com/Vialibrex/concord/blob/faaadad9c93d1967d44a65732bfcb02b7a93aefc/docs/compatibility.md).
@@ -91,54 +53,6 @@ Full protocol and field list: [Concord compatibility](https://github.com/Vialibr
 - **Rule sets & GeoIP**: Place local providers under `/etc/nikkic/run/core/` with relative paths; `SAFE_PATHS`, custom `GeoIP.dat`, and `BundleMRS.7z` are unsupported.
 - **DNS**: `dns.fallback-filter` defaults to `geoip: false`; `dhcp://<interface>` is handled as `system://`—use explicit upstreams if dnsmasq forwards to Concord.
 - **Dashboard & Fast Reload**: Non-loopback controllers require an API secret; with Fast Reload enabled, click **Restart Service** after changing controller address, secret, TLS, or dashboard URL.
-
----
-
-## Building from source
-
-Requires `git`, `python3`, `node`, `gzip`, `unzip`, `po2lmo` from the OpenWrt LuCI SDK, Concord's pinned Rust toolchain, `zig`, and `cargo-zigbuild`.
-
-<details>
-<summary>Cross-build and packaging commands</summary>
-
-```sh
-mkdir -p build/dashboard release
-git clone https://github.com/Vialibrex/concord.git build/concord-src
-git -C build/concord-src checkout --detach "$(cat core/upstream-revision)"
-git -C build/concord-src apply "$PWD/core/concord.patch"
-git -C build/concord-src apply "$PWD/core/concord-openwrt-controller.patch"
-
-cpu=aarch64
-arch=aarch64_cortex-a53
-target="$cpu-unknown-linux-musl"
-
-mkdir -p build/zig-bin
-printf '#!/bin/sh\nexec zig ar "$@"\n' > build/zig-bin/ar
-printf '#!/bin/sh\nexec zig ranlib "$@"\n' > build/zig-bin/ranlib
-chmod +x build/zig-bin/ar build/zig-bin/ranlib
-
-(cd build/concord-src && PATH="$PWD/../zig-bin:$PATH" \
-  JEMALLOC_SYS_WITH_LG_PAGE=12 \
-  JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:0,muzzy_decay_ms:0,narenas:1,tcache:false" \
-  cargo zigbuild --locked --release --target "$target" -p concord-desktop)
-
-gzip -n -9 -c "build/concord-src/target/$target/release/concord" > "build/concord-$cpu.gz"
-unzip -q assets/zashboard-v3.30.0.zip -d build/zashboard-extract
-cp -R build/zashboard-extract/dist/. build/dashboard/
-
-python3 build-root.py --direct-core --cpu "$cpu" --core "build/concord-$cpu.gz" "build/package-$cpu"
-node check-luci.mjs "build/package-$cpu"
-
-# Package for OpenWrt 25.12+ (.apk)
-python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$arch.apk"
-
-# Package for OpenWrt / ImmortalWrt 23.05 & 24.10 (.ipk)
-python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$arch.ipk"
-```
-
-All three ARM64 architectures share the `cpu=aarch64` build; set both `cpu` and `arch` to `x86_64` for x86-64.
-
-</details>
 
 ---
 
