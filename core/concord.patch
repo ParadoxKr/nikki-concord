@@ -532,7 +532,7 @@ index 4c2500d..ed40262 100644
          })
          .collect();
 diff --git a/crates/controller/tests/routes.rs b/crates/controller/tests/routes.rs
-index 6563b09..26e619c 100644
+index b596870..4d42eff 100644
 --- a/crates/controller/tests/routes.rs
 +++ b/crates/controller/tests/routes.rs
 @@ -560,6 +560,75 @@ async fn a_tun_stack_is_neither_reported_nor_refused() {
@@ -935,6 +935,321 @@ index 8ceb68d..d994e48 100644
          ipv6,
      }
  }
+diff --git a/crates/proxy/src/hysteria/mod.rs b/crates/proxy/src/hysteria/mod.rs
+index e7ac7a8..a9c4e0f 100644
+--- a/crates/proxy/src/hysteria/mod.rs
++++ b/crates/proxy/src/hysteria/mod.rs
+@@ -17,11 +17,11 @@ use concord_common::{
+ };
+ use concord_config::proxy::{HysteriaOpts, ProxyDef};
+ use concord_quic::{
+-    Brutal, CONN_WINDOW, Hop, ObfsSpec, QuicConn, QuicStream, STREAM_WINDOW, SharedConn,
+-    SwitchFactory, Transport, io_error,
++    Brutal, CONN_WINDOW, Hop, ObfsSpec, QuicConn, QuicStream, STREAM_WINDOW, SharedConn, Transport,
++    io_error,
+ };
+ use quinn::congestion::ControllerFactory;
+-use quinn::{SendStream, TransportConfig, VarInt};
++use quinn::{SendStream, VarInt};
+ use tokio::io::AsyncWriteExt;
+ 
+ use self::stream::FastOpen;
+@@ -29,7 +29,7 @@ use self::udp::{Hub, Hy1Packets};
+ use self::wire::{client_hello, client_request, read_server_hello, read_server_response};
+ use crate::ctx::{BuildCtx, BuildError};
+ use crate::node::{Egress, info_for};
+-use crate::quic::{QuicLink, node_crypto};
++use crate::quic::{QuicLink, QuicTransport, node_crypto};
+ use crate::session_slot::SessionSlot;
+ use crate::util::{parse_bps, parse_ports};
+ 
+@@ -68,7 +68,6 @@ struct Hysteria {
+     up: u64,
+     down: u64,
+     fast_open: bool,
+-    controllers: Arc<SwitchFactory>,
+     current: SessionSlot<Hy1Conn>,
+     connecting: tokio::sync::Mutex<()>,
+ }
+@@ -94,7 +93,7 @@ impl Hysteria {
+         } else {
+             hello.recv_bps
+         };
+-        if let Some(switch) = self.controllers.handle() {
++        if let Some(switch) = &quic.switch {
+             switch.replace_brutal(Brutal::hysteria(rate, quic.conn.rtt(), Instant::now()));
+         }
+         Ok(control)
+@@ -218,7 +217,7 @@ impl Outbound for Hysteria {
+     }
+ }
+ 
+-fn transport(opts: &HysteriaOpts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
++fn transport_spec(opts: &HysteriaOpts) -> Transport {
+     let (stream_window, conn_window) = if opts.recv_window == 0 {
+         (STREAM_WINDOW, CONN_WINDOW)
+     } else if opts.recv_window_conn == 0 {
+@@ -237,9 +236,8 @@ fn transport(opts: &HysteriaOpts, controllers: Arc<SwitchFactory>) -> Arc<Transp
+         datagram_frame: DATAGRAM_FRAME,
+         streams: None,
+         mtu_discovery: !opts.disable_mtu_discovery,
+-        congestion: Some(controllers),
++        congestion: None,
+     }
+-    .build()
+ }
+ 
+ fn auth(opts: &HysteriaOpts) -> Result<Vec<u8>, BuildError> {
+@@ -327,7 +325,6 @@ pub(crate) fn build(
+     });
+     let (server_name, tls) = node_crypto(&opts.tls, &opts.server, "hysteria", ctx)?;
+     let initial: Arc<dyn ControllerFactory + Send + Sync> = Arc::new(concord_quic::cubic());
+-    let controllers = SwitchFactory::new(initial);
+     let port = if opts.port == 0 {
+         ports.first().copied().unwrap_or(0)
+     } else {
+@@ -338,7 +335,10 @@ pub(crate) fn build(
+         server: Address::new(&opts.server, port),
+         server_name: Some(server_name),
+         crypto: tls,
+-        transport: transport(opts, controllers.clone()),
++        transport: QuicTransport::Switchable {
++            base: transport_spec(opts),
++            initial,
++        },
+         obfs,
+         hop,
+         datagram_frame: Some(DATAGRAM_FRAME),
+@@ -351,7 +351,6 @@ pub(crate) fn build(
+         up,
+         down,
+         fast_open: opts.fast_open,
+-        controllers,
+         current: SessionSlot::default(),
+         connecting: tokio::sync::Mutex::new(()),
+     }))
+diff --git a/crates/proxy/src/hysteria2/mod.rs b/crates/proxy/src/hysteria2/mod.rs
+index 3beedac..669d855 100644
+--- a/crates/proxy/src/hysteria2/mod.rs
++++ b/crates/proxy/src/hysteria2/mod.rs
+@@ -14,10 +14,9 @@ use concord_common::{
+ };
+ use concord_config::proxy::{Hysteria2Opts, ProxyDef};
+ use concord_quic::{
+-    BbrProfile, Brutal, Hop, ObfsSpec, QuicStream, SharedConn, SwitchFactory, Transport,
+-    bbr_factory, bbr_window, io_error, or_default,
++    BbrProfile, Brutal, Hop, ObfsSpec, QuicStream, SharedConn, Transport, bbr_factory, bbr_window,
++    io_error, or_default,
+ };
+-use quinn::TransportConfig;
+ use quinn::congestion::ControllerFactory;
+ 
+ use self::realm::Realm;
+@@ -26,7 +25,7 @@ use self::udp::{Hub, Hy2Packets};
+ use crate::ctx::{BuildCtx, BuildError};
+ use crate::lazy::{HeadFirst, Kick};
+ use crate::node::{Egress, info_for};
+-use crate::quic::{QuicLink, node_crypto};
++use crate::quic::{QuicLink, QuicTransport, node_crypto};
+ use crate::session_slot::{Dial, SessionSlot};
+ use crate::util::{parse_bps, parse_ports};
+ 
+@@ -66,7 +65,6 @@ struct Hysteria2 {
+     down: u64,
+     udp_mtu: usize,
+     handshake_timeout: Option<Duration>,
+-    controllers: Arc<SwitchFactory>,
+     current: SessionSlot<Hy2Conn>,
+     connecting: tokio::sync::Mutex<()>,
+ }
+@@ -146,7 +144,7 @@ impl Hysteria2 {
+         }
+         if !reply.rx_auto
+             && rate > 0
+-            && let Some(switch) = self.controllers.handle()
++            && let Some(switch) = &quic.switch
+         {
+             switch.replace_brutal(Brutal::hysteria2(rate, quic.conn.rtt(), Instant::now()));
+         }
+@@ -193,6 +191,27 @@ impl Hysteria2 {
+             me.current.settle(dial, made, |conn| conn.close());
+         });
+     }
++    fn forget(&self, conn: &Arc<Hy2Conn>) {
++        self.current.forget(conn);
++    }
++
++    async fn open_stream(
++        &self,
++        cx: &DialCx<'_>,
++    ) -> io::Result<(Arc<Hy2Conn>, quinn::SendStream, quinn::RecvStream)> {
++        let mut last = None;
++        for _ in 0..2 {
++            let conn = self.offer(cx).await?;
++            match conn.shared.quic.conn.open_bi().await {
++                Ok((send, recv)) => return Ok((conn, send, recv)),
++                Err(err) => {
++                    self.forget(&conn);
++                    last = Some(io_error(err));
++                }
++            }
++        }
++        Err(last.unwrap_or_else(|| io::Error::from(io::ErrorKind::NotConnected)))
++    }
+ }
+ 
+ #[async_trait]
+@@ -202,8 +221,7 @@ impl Outbound for Hysteria2 {
+     }
+ 
+     async fn connect(&self, cx: &DialCx<'_>, dst: &Address) -> io::Result<BoxStream> {
+-        let conn = self.offer(cx).await?;
+-        let (send, recv) = conn.shared.quic.conn.open_bi().await.map_err(io_error)?;
++        let (conn, send, recv) = self.open_stream(cx).await?;
+         let head = wire::tcp_request(&dst.to_string());
+         let stream = HeadFirst::new(QuicStream::new(send, recv, Box::new(conn)), head);
+         Ok(Box::new(Kick::new(Hy2Stream::new(stream))))
+@@ -265,7 +283,7 @@ fn window(initial: u64, max: u64, fallback: u64) -> u64 {
+     or_default(initial, fallback).max(or_default(max, fallback))
+ }
+ 
+-fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
++fn transport_spec(opts: &Hysteria2Opts) -> Transport {
+     Transport {
+         stream_window: window(
+             opts.initial_stream_receive_window,
+@@ -282,9 +300,8 @@ fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<Trans
+         datagram_frame: DATAGRAM_FRAME,
+         streams: None,
+         mtu_discovery: true,
+-        congestion: Some(controllers),
++        congestion: None,
+     }
+-    .build()
+ }
+ 
+ fn initial_controller(opts: &Hysteria2Opts) -> Arc<dyn ControllerFactory + Send + Sync> {
+@@ -351,7 +368,6 @@ fn build_hy2(
+         Some(Hop { ports, min, max })
+     };
+     let (server_name, tls) = node_crypto(&opts.tls, &opts.server, "h3", ctx)?;
+-    let controllers = SwitchFactory::new(initial_controller(opts));
+     let port = if opts.port == 0 {
+         hop.as_ref()
+             .and_then(|hop| hop.ports.first().copied())
+@@ -364,7 +380,10 @@ fn build_hy2(
+         server: Address::new(&opts.server, port),
+         server_name: Some(server_name),
+         crypto: tls,
+-        transport: transport(opts, controllers.clone()),
++        transport: QuicTransport::Switchable {
++            base: transport_spec(opts),
++            initial: initial_controller(opts),
++        },
+         obfs: obfs_spec(opts)?,
+         hop,
+         datagram_frame: Some(DATAGRAM_FRAME),
+@@ -385,7 +404,6 @@ fn build_hy2(
+         },
+         handshake_timeout: (opts.handshake_timeout > 0)
+             .then(|| Duration::from_secs(u64::from(opts.handshake_timeout))),
+-        controllers,
+         current: SessionSlot::default(),
+         connecting: tokio::sync::Mutex::new(()),
+     }))
+@@ -716,4 +734,32 @@ mod tests {
+         let err = built.offer(&cx).await.err().unwrap();
+         assert!(concord_platform::is_local_exhaustion(&err), "{err}");
+     }
++
++    #[tokio::test]
++    async fn connect_forgets_stale_session_and_retries_once() {
++        use std::sync::atomic::Ordering;
++
++        let (authenticated, mut peers) = tokio::sync::mpsc::unbounded_channel();
++        let (port, accepted, _server) = accepting_server(move |peer| {
++            let _ = authenticated.send(peer);
++        });
++        let tracked = crate::testing::Tracked::new();
++        let built = tracked_hy2(port, &tracked);
++        let env = crate::testing::test_env();
++        let cx = DialCx::new(&env, Initiator::Other, None);
++
++        // Establish initial cached session and verify it carries its own switch handle.
++        let first = built.offer(&cx).await.unwrap();
++        assert!(first.shared.quic.switch.is_some());
++        let peer = peers.recv().await.unwrap();
++
++        // Close the connection from the server side so the cached session goes stale.
++        peer.close(quinn::VarInt::from_u32(0), b"restart");
++        first.shared.quic.conn.closed().await;
++
++        // `connect()` must evict the stale session and transparently establish a fresh one.
++        let target = Address::parse("127.0.0.1:80").unwrap();
++        let _stream = built.connect(&cx, &target).await.unwrap();
++        assert_eq!(accepted.load(Ordering::SeqCst), 2);
++    }
+ }
+diff --git a/crates/proxy/src/link/xhttp_quic.rs b/crates/proxy/src/link/xhttp_quic.rs
+index df54fe0..1e2689d 100644
+--- a/crates/proxy/src/link/xhttp_quic.rs
++++ b/crates/proxy/src/link/xhttp_quic.rs
+@@ -9,7 +9,7 @@ use concord_transport::QuicDialFn;
+ use super::{EnvSlot, POOL_DIALS, pool_chain};
+ use crate::ctx::{BuildCtx, BuildError};
+ use crate::node::Egress;
+-use crate::quic::{QuicLink, quic_crypto};
++use crate::quic::{QuicLink, QuicTransport, quic_crypto};
+ use crate::tlsmap::{TlsSpec, tls_options};
+ 
+ pub(super) fn dial(
+@@ -57,7 +57,7 @@ pub(super) fn dial(
+         server: Address::new(server, port),
+         server_name: Some(sni),
+         crypto: quic_crypto(&options, ctx.trust.clone(), &["h3"], slot.clone())?,
+-        transport: Arc::new(h3_transport(period)?),
++        transport: QuicTransport::Fixed(Arc::new(h3_transport(period)?)),
+         obfs: ObfsSpec::None,
+         hop: None,
+         datagram_frame: None,
+diff --git a/crates/proxy/src/masque/config.rs b/crates/proxy/src/masque/config.rs
+index c8bf0d2..1137da0 100644
+--- a/crates/proxy/src/masque/config.rs
++++ b/crates/proxy/src/masque/config.rs
+@@ -9,7 +9,7 @@ use ipnetwork::IpNetwork;
+ 
+ use crate::ctx::{BuildCtx, BuildError};
+ use crate::node::Egress;
+-use crate::quic::{Crypto, QuicLink};
++use crate::quic::{Crypto, QuicLink, QuicTransport};
+ use crate::wireguard::config::{DnsServer, dns_server};
+ 
+ const INITIAL_PACKET_SIZE: u16 = 1242;
+@@ -82,7 +82,7 @@ impl Config {
+                 server: concord_common::Address::new(&opts.server, opts.port),
+                 server_name: Some(sni.clone()),
+                 crypto: Crypto::Rustls(tls.clone()),
+-                transport: Arc::new(transport),
++                transport: QuicTransport::Fixed(Arc::new(transport)),
+                 obfs: ObfsSpec::None,
+                 hop: None,
+                 datagram_frame: Some(16_383),
+diff --git a/crates/proxy/src/masque/tests/review.rs b/crates/proxy/src/masque/tests/review.rs
+index 7936d86..831fb6f 100644
+--- a/crates/proxy/src/masque/tests/review.rs
++++ b/crates/proxy/src/masque/tests/review.rs
+@@ -87,7 +87,10 @@ async fn masque_initial_path_mtu_drops_large_udp_without_shrinking_the_ip_stack(
+     let server = fixture::h3_server(false, 200).await;
+     let mut config = config(&server, "h3");
+     // Hold Quinn at its initial 1242-byte path; a 1200-byte UDP payload plus IP headers cannot fit.
+-    Arc::get_mut(&mut config.link.transport)
++    let crate::quic::QuicTransport::Fixed(transport) = &mut config.link.transport else {
++        panic!("masque uses a fixed transport config");
++    };
++    Arc::get_mut(transport)
+         .unwrap()
+         .mtu_discovery_config(None);
+     let env = test_env();
 diff --git a/crates/proxy/src/node.rs b/crates/proxy/src/node.rs
 index bb492b2..4db4da8 100644
 --- a/crates/proxy/src/node.rs
@@ -954,6 +1269,312 @@ index bb492b2..4db4da8 100644
          cx.mark(ConnStep::Connected);
          Ok(stream)
      }
+diff --git a/crates/proxy/src/quic.rs b/crates/proxy/src/quic.rs
+index 0e3aba9..6d1c237 100644
+--- a/crates/proxy/src/quic.rs
++++ b/crates/proxy/src/quic.rs
+@@ -11,8 +11,8 @@ use rand::Rng;
+ 
+ use concord_config::proxy::TlsOpts;
+ use concord_quic::{
+-    CappedFrame, Hop, ObfsSpec, QuicConn, SessionSocket, TrackedRuntime, close_on_stop, io_error,
+-    wrap_socket,
++    CappedFrame, Hop, ObfsSpec, QuicConn, SessionSocket, SocketFactory, TrackedRuntime, Transport,
++    close_on_stop, io_error, wrap_socket_with_factory,
+ };
+ use concord_tls::{QuicTls, TlsOptions, TrustStore};
+ 
+@@ -45,13 +45,23 @@ pub(crate) enum Crypto {
+     Custom(Arc<dyn quinn::crypto::ClientConfig>),
+ }
+ 
++pub(crate) enum QuicTransport {
++    Fixed(Arc<quinn::TransportConfig>),
++    /// Builds a fresh `SwitchFactory` per handshake attempt so concurrent Happy Eyeballs
++    /// dials cannot overwrite one another's congestion-controller handle.
++    Switchable {
++        base: Transport,
++        initial: Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>,
++    },
++}
++
+ pub(crate) struct QuicLink {
+     pub(crate) egress: Egress,
+     pub(crate) server: Address,
+     /// `None` sends no SNI and names the server by its address.
+     pub(crate) server_name: Option<String>,
+     pub(crate) crypto: Crypto,
+-    pub(crate) transport: Arc<quinn::TransportConfig>,
++    pub(crate) transport: QuicTransport,
+     pub(crate) obfs: ObfsSpec,
+     pub(crate) hop: Option<Hop>,
+     /// The `max_datagram_frame_size` to advertise instead of the one quinn derives.
+@@ -176,7 +186,21 @@ impl QuicLink {
+     ) -> io::Result<QuicConn> {
+         let remote = self.first_port(remote);
+         let raw = self.open_socket(cx, remote).await?;
+-        self.handshake(cx, raw, remote, endpoint).await
++        let factory = if self.egress.via().is_none() && self.hop.is_some() {
++            let sockets = cx.env.sockets.clone();
++            let remote_ip = remote.ip();
++            let opts = SockOpts {
++                tunnel_udp_buffers: true,
++                ..self.egress.sock_opts(cx.env)
++            };
++            Some(Arc::new(move || {
++                let socket = sockets.bind_udp(remote_ip, &opts)?;
++                TokioRuntime.wrap_udp_socket(socket.into_std()?)
++            }) as SocketFactory)
++        } else {
++            None
++        };
++        self.handshake(cx, raw, remote, endpoint, factory).await
+     }
+ 
+     /// Dials the server's first address and completes the QUIC handshake, as mihomo's
+@@ -219,7 +243,7 @@ impl QuicLink {
+         remote: SocketAddr,
+     ) -> io::Result<QuicConn> {
+         let raw = TokioRuntime.wrap_udp_socket(socket)?;
+-        self.handshake(cx, raw, remote, client_endpoint_config())
++        self.handshake(cx, raw, remote, client_endpoint_config(), None)
+             .await
+     }
+ 
+@@ -229,11 +253,13 @@ impl QuicLink {
+         raw: Arc<dyn AsyncUdpSocket>,
+         remote: SocketAddr,
+         endpoint_config: EndpointConfig,
++        factory: Option<SocketFactory>,
+     ) -> io::Result<QuicConn> {
+-        let socket = wrap_socket(
++        let socket = wrap_socket_with_factory(
+             raw,
+             &self.obfs,
+             self.hop.as_ref().map(|hop| (remote.port(), hop.clone())),
++            factory,
+             &self.tasks,
+         );
+         let endpoint = Endpoint::new_with_abstract_socket(
+@@ -255,7 +281,14 @@ impl QuicLink {
+             }
+             other => other,
+         };
+-        let config = client_config(crypto, &self.transport, self.datagram_frame)
++        let (transport, attempt_switch) = match &self.transport {
++            QuicTransport::Fixed(cfg) => (cfg.clone(), None),
++            QuicTransport::Switchable { base, initial } => {
++                let (cfg, switch_factory) = base.clone().build_switch(initial.clone());
++                (cfg, Some(switch_factory))
++            }
++        };
++        let config = client_config(crypto, &transport, self.datagram_frame)
+             .map_err(io::Error::other)?;
+         let connecting = endpoint
+             .connect_with(config, remote, &name)
+@@ -267,7 +300,8 @@ impl QuicLink {
+             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+         cx.mark(ConnStep::Tls);
+         close_on_stop(&self.tasks, conn.clone());
+-        Ok(QuicConn::new(conn, endpoint, self.tasks.clone()))
++        let switch = attempt_switch.and_then(|switch_factory| switch_factory.handle());
++        Ok(QuicConn::with_switch(conn, endpoint, self.tasks.clone(), switch))
+     }
+ }
+ 
+@@ -399,7 +433,7 @@ mod tests {
+                 )
+                 .unwrap(),
+             ),
+-            transport: Arc::new(transport_config()),
++            transport: QuicTransport::Fixed(Arc::new(transport_config())),
+             obfs: ObfsSpec::None,
+             hop: None,
+             datagram_frame: None,
+diff --git a/crates/proxy/src/shadowquic/mod.rs b/crates/proxy/src/shadowquic/mod.rs
+index a92731e..c877f9c 100644
+--- a/crates/proxy/src/shadowquic/mod.rs
++++ b/crates/proxy/src/shadowquic/mod.rs
+@@ -15,11 +15,11 @@ use concord_common::{
+ };
+ use concord_config::proxy::{ProxyDef, ShadowQuicOpts};
+ use concord_quic::{
+-    BbrProfile, Brutal, CONN_WINDOW, ObfsSpec, QuicStream, STREAM_WINDOW, SharedConn,
+-    SwitchFactory, Transport, bbr_factory, bbr_window, io_error, or_default,
++    BbrProfile, Brutal, CONN_WINDOW, ObfsSpec, QuicStream, STREAM_WINDOW, SharedConn, Switch,
++    Transport, bbr_factory, bbr_window, io_error, or_default,
+ };
++use quinn::VarInt;
+ use quinn::congestion::ControllerFactory;
+-use quinn::{TransportConfig, VarInt};
+ use tokio::io::{AsyncReadExt, AsyncWriteExt};
+ use tokio::task::JoinHandle;
+ 
+@@ -31,7 +31,7 @@ use self::wire::{
+ };
+ use crate::ctx::{BuildCtx, BuildError};
+ use crate::node::{Egress, info_for};
+-use crate::quic::{Crypto, QuicLink};
++use crate::quic::{Crypto, QuicLink, QuicTransport};
+ use crate::session_slot::SessionSlot;
+ use crate::util::parse_bps;
+ 
+@@ -72,7 +72,6 @@ struct ShadowQuic {
+     info: OutboundInfo,
+     link: QuicLink,
+     settings: Settings,
+-    controllers: Arc<SwitchFactory>,
+     current: SessionSlot<SqConn>,
+     connecting: tokio::sync::Mutex<()>,
+ }
+@@ -96,7 +95,7 @@ async fn read_uni(stream: &mut quinn::RecvStream, shared: &Shared) -> io::Result
+ /// grants, and whether the client should rather stay on a congestion controller.
+ async fn negotiate(
+     conn: quinn::Connection,
+-    controllers: Arc<SwitchFactory>,
++    switch: Option<Switch>,
+     settings: Arc<Settings>,
+ ) {
+     let exchange = async {
+@@ -114,7 +113,7 @@ async fn negotiate(
+     } else {
+         rx
+     };
+-    let Some(switch) = controllers.handle() else {
++    let Some(switch) = switch else {
+         return;
+     };
+     if !auto && rate > 0 {
+@@ -148,7 +147,7 @@ impl ShadowQuic {
+             let settings = Arc::new(self.settings);
+             tasks.push(shared.quic.tasks.spawn(negotiate(
+                 shared.quic.conn.clone(),
+-                self.controllers.clone(),
++                shared.quic.switch.clone(),
+                 settings,
+             )));
+         }
+@@ -254,7 +253,7 @@ fn datagram_frame(opts: &ShadowQuicOpts) -> u64 {
+     or_default(opts.max_datagram_frame_size, DEFAULT_FRAME)
+ }
+ 
+-fn transport(opts: &ShadowQuicOpts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
++fn transport_spec(opts: &ShadowQuicOpts) -> Transport {
+     Transport {
+         stream_window: or_default(opts.recv_window_conn, STREAM_WINDOW),
+         conn_window: or_default(opts.recv_window, CONN_WINDOW),
+@@ -264,9 +263,8 @@ fn transport(opts: &ShadowQuicOpts, controllers: Arc<SwitchFactory>) -> Arc<Tran
+         datagram_frame: datagram_frame(opts),
+         streams: Some(or_default(opts.max_open_streams, DEFAULT_STREAMS)),
+         mtu_discovery: !opts.disable_mtu_discovery,
+-        congestion: Some(controllers),
++        congestion: None,
+     }
+-    .build()
+ }
+ 
+ /// `Ok(true)` when QUIC version 1 is among the requested ones.
+@@ -312,11 +310,11 @@ pub(crate) fn build(
+     let jls = JlsClient::new(user, &alpn)
+         .map_err(|err| BuildError::invalid(format!("shadowquic tls: {err}")))?;
+     let window = bbr_window(opts.cwnd);
+-    let controllers = SwitchFactory::new(controller(
++    let initial = controller(
+         &opts.congestion_controller,
+         window,
+         BbrProfile::parse(&opts.bbr_profile),
+-    ));
++    );
+     let link = QuicLink {
+         egress: Egress::new(&def.name, &def.common),
+         server: Address::new(&opts.server, opts.port),
+@@ -326,7 +324,10 @@ pub(crate) fn build(
+             opts.sni.clone()
+         }),
+         crypto: Crypto::Custom(Arc::new(jls)),
+-        transport: transport(opts, controllers.clone()),
++        transport: QuicTransport::Switchable {
++            base: transport_spec(opts),
++            initial,
++        },
+         obfs: ObfsSpec::None,
+         hop: None,
+         datagram_frame: Some(datagram_frame(opts)),
+@@ -342,7 +343,6 @@ pub(crate) fn build(
+             bbr_window: window,
+             profile: BbrProfile::parse(&opts.bbr_profile),
+         },
+-        controllers,
+         current: SessionSlot::default(),
+         connecting: tokio::sync::Mutex::new(()),
+     }))
+diff --git a/crates/proxy/src/shadowquic/tests.rs b/crates/proxy/src/shadowquic/tests.rs
+index 37d2305..e689575 100644
+--- a/crates/proxy/src/shadowquic/tests.rs
++++ b/crates/proxy/src/shadowquic/tests.rs
+@@ -16,7 +16,7 @@ use concord_common::sync::lock;
+ use concord_common::{Address, DialCx, Initiator, Outbound, PacketBuf, recv_packet, send_packet};
+ use concord_config::proxy::ProxyKind;
+ use concord_config::{Capabilities, ProxyParse, parse_proxy};
+-use concord_quic::{BbrProfile, DatagramHub, ObfsSpec, SwitchFactory};
++use concord_quic::{BbrProfile, DatagramHub, ObfsSpec};
+ use concord_test_support::udp_echo;
+ use concord_tls::{TlsOptions, TrustStore};
+ use serde_json::{Value, json};
+@@ -28,7 +28,7 @@ use super::{Settings, ShadowQuic, Shared, controller};
+ use crate::addr_codec::SOCKS;
+ use crate::ctx::BuildCtx;
+ use crate::node::Egress;
+-use crate::quic::{Crypto, QuicLink};
++use crate::quic::{Crypto, QuicLink, QuicTransport};
+ use crate::testing::{HeldLookup, quic_server, test_env};
+ 
+ type Routes = Arc<Mutex<HashMap<u16, (Arc<UdpSocket>, SocketAddr)>>>;
+@@ -233,24 +233,25 @@ fn client_link(port: u16) -> QuicLink {
+     };
+     let tls = concord_tls::quic_client_config(&options, TrustStore::new(b"", Vec::new()), &["h3"])
+         .unwrap();
+-    let controllers = SwitchFactory::new(controller(
++    let initial = controller(
+         "",
+         concord_quic::bbr_window(0),
+         BbrProfile::Standard,
+-    ));
+-    let mut link = QuicLink {
++    );
++    QuicLink {
+         tasks: Default::default(),
+         egress: Egress::new("sq", &Default::default()),
+         server: Address::new("127.0.0.1", port),
+         server_name: Some("localhost".to_string()),
+         crypto: Crypto::Rustls(tls),
+-        transport: Default::default(),
++        transport: QuicTransport::Switchable {
++            base: super::transport_spec(&Default::default()),
++            initial,
++        },
+         obfs: ObfsSpec::None,
+         hop: None,
+         datagram_frame: None,
+-    };
+-    link.transport = super::transport(&Default::default(), controllers);
+-    link
++    }
+ }
+ 
+ fn outbound(port: u16, settings: Settings) -> ShadowQuic {
+@@ -264,11 +265,6 @@ fn outbound(port: u16, settings: Settings) -> ShadowQuic {
+         ),
+         link: client_link(port),
+         settings,
+-        controllers: SwitchFactory::new(controller(
+-            "",
+-            concord_quic::bbr_window(0),
+-            BbrProfile::Standard,
+-        )),
+         current: crate::session_slot::SessionSlot::default(),
+         connecting: tokio::sync::Mutex::new(()),
+     }
 diff --git a/crates/proxy/src/testing.rs b/crates/proxy/src/testing.rs
 index 48a3c5e..c26f9fc 100644
 --- a/crates/proxy/src/testing.rs
@@ -966,6 +1587,28 @@ index 48a3c5e..c26f9fc 100644
          ipv6: true,
      }
  }
+diff --git a/crates/proxy/src/tuic/mod.rs b/crates/proxy/src/tuic/mod.rs
+index 6c6631b..2586dda 100644
+--- a/crates/proxy/src/tuic/mod.rs
++++ b/crates/proxy/src/tuic/mod.rs
+@@ -26,7 +26,7 @@ use self::wire::Version;
+ use crate::ctx::{BuildCtx, BuildError};
+ use crate::lazy::{HeadFirst, Kick};
+ use crate::node::{Egress, info_for};
+-use crate::quic::{QuicLink, node_crypto};
++use crate::quic::{QuicLink, QuicTransport, node_crypto};
+ use crate::uot;
+ 
+ const MAX_FRAME: usize = 1400;
+@@ -252,7 +252,7 @@ pub(crate) fn build(
+         server: Address::new(host, opts.port),
+         server_name: (!opts.disable_sni).then_some(server_name),
+         crypto: tls,
+-        transport: transport(opts, heartbeat, client_max_open, frame),
++        transport: QuicTransport::Fixed(transport(opts, heartbeat, client_max_open, frame)),
+         obfs: ObfsSpec::None,
+         hop: None,
+         datagram_frame: u64::try_from(frame).ok(),
 diff --git a/crates/proxy/tests/interop.rs b/crates/proxy/tests/interop.rs
 index f7df12d..be77363 100644
 --- a/crates/proxy/tests/interop.rs
@@ -977,6 +1620,590 @@ index f7df12d..be77363 100644
 +        proxy_tcp_ipv6_prefer: false,
          ipv6: true,
      }
+ }
+diff --git a/crates/quic/src/lib.rs b/crates/quic/src/lib.rs
+index 7a6a5bf..779c8f5 100644
+--- a/crates/quic/src/lib.rs
++++ b/crates/quic/src/lib.rs
+@@ -30,7 +30,7 @@ use self::obfs::{Gecko, Salamander, WeChat, XPlus};
+ pub use self::session_socket::SessionSocket;
+ pub use self::sessions::{Fragment, Inbox, Sessions};
+ pub use self::shared::{DatagramHub, SharedConn};
+-pub use self::socket::Hop;
++pub use self::socket::{Hop, SocketFactory};
+ use self::socket::{Obfs, WrappedSocket};
+ pub use self::tasks::{TrackedRuntime, close_on_stop};
+ pub use self::transport::{
+@@ -81,14 +81,25 @@ pub struct QuicConn {
+     pub conn: quinn::Connection,
+     endpoint: Endpoint,
+     pub tasks: Tasks,
++    pub switch: Option<Switch>,
+ }
+ 
+ impl QuicConn {
+     pub fn new(conn: quinn::Connection, endpoint: Endpoint, tasks: Tasks) -> Self {
++        Self::with_switch(conn, endpoint, tasks, None)
++    }
++
++    pub fn with_switch(
++        conn: quinn::Connection,
++        endpoint: Endpoint,
++        tasks: Tasks,
++        switch: Option<Switch>,
++    ) -> Self {
+         QuicConn {
+             conn,
+             endpoint,
+             tasks,
++            switch,
+         }
+     }
+ }
+@@ -141,13 +152,23 @@ pub fn wrap_socket(
+     obfs: &ObfsSpec,
+     hop: Option<(u16, Hop)>,
+     tasks: &Tasks,
++) -> Arc<dyn AsyncUdpSocket> {
++    wrap_socket_with_factory(raw, obfs, hop, None, tasks)
++}
++
++pub fn wrap_socket_with_factory(
++    raw: Arc<dyn AsyncUdpSocket>,
++    obfs: &ObfsSpec,
++    hop: Option<(u16, Hop)>,
++    factory: Option<SocketFactory>,
++    tasks: &Tasks,
+ ) -> Arc<dyn AsyncUdpSocket> {
+     match (obfs, hop) {
+         #[cfg(windows)]
+         (ObfsSpec::None, None) => Arc::new(socket::SingleReceive(raw)),
+         #[cfg(not(windows))]
+         (ObfsSpec::None, None) => raw,
+-        (obfs, hop) => WrappedSocket::new(raw, obfs.build(), hop, tasks),
++        (obfs, hop) => WrappedSocket::new(raw, obfs.build(), hop, factory, tasks),
+     }
+ }
+ 
+diff --git a/crates/quic/src/socket.rs b/crates/quic/src/socket.rs
+index ba45470..c50bc41 100644
+--- a/crates/quic/src/socket.rs
++++ b/crates/quic/src/socket.rs
+@@ -2,9 +2,9 @@ use std::fmt;
+ use std::io::{self, IoSliceMut};
+ use std::net::SocketAddr;
+ use std::pin::Pin;
+-use std::sync::atomic::{AtomicU16, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+ use std::sync::{Arc, Mutex, Weak};
+-use std::task::{Context, Poll, ready};
++use std::task::{Context, Poll, Waker};
+ use std::time::Duration;
+ 
+ use concord_common::Tasks;
+@@ -16,6 +16,9 @@ use tokio::task::JoinHandle;
+ 
+ use crate::obfs::{Gecko, Opened, Seal};
+ 
++/// Creates a fresh local UDP socket when port hopping rotates the 5-tuple.
++pub type SocketFactory = Arc<dyn Fn() -> io::Result<Arc<dyn AsyncUdpSocket>> + Send + Sync>;
++
+ pub(crate) enum Obfs {
+     None,
+     Seal(Box<dyn Seal>),
+@@ -31,9 +34,24 @@ pub struct Hop {
+     pub max: Duration,
+ }
+ 
++struct SocketSlots {
++    active: Arc<dyn AsyncUdpSocket>,
++    previous: Option<Arc<dyn AsyncUdpSocket>>,
++    generation: u64,
++    recv_waker: Option<Waker>,
++    send_waker: Option<Waker>,
++}
++
++struct HopShared {
++    current: AtomicU16,
++    active_tx: AtomicBool,
++    sockets: Arc<Mutex<SocketSlots>>,
++    factory: Option<SocketFactory>,
++}
++
+ struct HopState {
+     base_port: u16,
+-    current: Arc<AtomicU16>,
++    shared: Arc<HopShared>,
+     task: JoinHandle<()>,
+ }
+ 
+@@ -44,18 +62,29 @@ impl Drop for HopState {
+ }
+ 
+ impl HopState {
+-    fn start(base_port: u16, hop: Hop, tasks: &Tasks) -> Self {
+-        let current = Arc::new(AtomicU16::new(base_port));
+-        let task = tasks.spawn(hop_loop(Arc::downgrade(&current), hop));
++    fn start(
++        base_port: u16,
++        hop: Hop,
++        sockets: Arc<Mutex<SocketSlots>>,
++        factory: Option<SocketFactory>,
++        tasks: &Tasks,
++    ) -> Self {
++        let shared = Arc::new(HopShared {
++            current: AtomicU16::new(base_port),
++            active_tx: AtomicBool::new(false),
++            sockets,
++            factory,
++        });
++        let task = tasks.spawn(hop_loop(Arc::downgrade(&shared), hop));
+         HopState {
+             base_port,
+-            current,
++            shared,
+             task,
+         }
+     }
+ }
+ 
+-async fn hop_loop(current: Weak<AtomicU16>, hop: Hop) {
++async fn hop_loop(shared: Weak<HopShared>, hop: Hop) {
+     loop {
+         let wait = if hop.max > hop.min {
+             let span = u64::try_from((hop.max - hop.min).as_millis()).unwrap_or(0);
+@@ -64,25 +93,96 @@ async fn hop_loop(current: Weak<AtomicU16>, hop: Hop) {
+             hop.min
+         };
+         tokio::time::sleep(wait).await;
+-        let Some(current) = current.upgrade() else {
++        let Some(shared) = shared.upgrade() else {
+             return;
+         };
+-        let pick = rand::rng().random_range(0..hop.ports.len().max(1));
++        // Skip rotating sockets or ports while the connection is completely idle.
++        if !shared.active_tx.swap(false, Ordering::Relaxed) {
++            continue;
++        }
++        let pick = if hop.ports.len() > 1 {
++            let prev = shared.current.load(Ordering::Relaxed);
++            let mut idx = rand::rng().random_range(0..hop.ports.len());
++            if hop.ports.get(idx).copied() == Some(prev) {
++                idx = (idx + 1) % hop.ports.len();
++            }
++            idx
++        } else {
++            0
++        };
++        if let Some(factory) = &shared.factory
++            && let Ok(next_socket) = factory()
++        {
++            let (recv_waker, send_waker) = {
++                let mut slots = lock(&shared.sockets);
++                let old = std::mem::replace(&mut slots.active, next_socket);
++                slots.previous = Some(old);
++                slots.generation = slots.generation.wrapping_add(1);
++                (slots.recv_waker.take(), slots.send_waker.take())
++            };
++            if let Some(port) = hop.ports.get(pick) {
++                shared.current.store(*port, Ordering::Relaxed);
++            }
++            if let Some(waker) = recv_waker {
++                waker.wake();
++            }
++            if let Some(waker) = send_waker {
++                waker.wake();
++            }
++            continue;
++        }
+         if let Some(port) = hop.ports.get(pick) {
+-            current.store(*port, Ordering::Relaxed);
++            shared.current.store(*port, Ordering::Relaxed);
+         }
+     }
+ }
+ 
+-/// Obfuscates datagrams and hops the server port over whatever socket the
+-/// factory produced, so quinn sees one peer address throughout.
++/// Obfuscates datagrams and hops the server port (and local UDP socket when a
++/// factory is provided), so quinn sees one peer address throughout.
+ pub(crate) struct WrappedSocket {
+-    inner: Arc<dyn AsyncUdpSocket>,
++    sockets: Arc<Mutex<SocketSlots>>,
+     obfs: Obfs,
+     hop: Option<HopState>,
+     scratch: Mutex<Vec<u8>>,
+ }
+ 
++struct WrappedPoller {
++    sockets: Arc<Mutex<SocketSlots>>,
++    generation: u64,
++    inner: Pin<Box<dyn UdpPoller>>,
++}
++
++impl fmt::Debug for WrappedPoller {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("WrappedPoller").finish_non_exhaustive()
++    }
++}
++
++impl UdpPoller for WrappedPoller {
++    fn poll_writable(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
++        loop {
++            let (generation, active) = {
++                let mut slots = lock(&self.sockets);
++                slots.send_waker = Some(cx.waker().clone());
++                (slots.generation, slots.active.clone())
++            };
++            if generation != self.generation {
++                self.inner = active.create_io_poller();
++                self.generation = generation;
++            }
++            match self.inner.as_mut().poll_writable(cx) {
++                Poll::Ready(result) => return Poll::Ready(result),
++                Poll::Pending => {
++                    if lock(&self.sockets).generation != self.generation {
++                        continue;
++                    }
++                    return Poll::Pending;
++                }
++            }
++        }
++    }
++}
++
+ impl fmt::Debug for WrappedSocket {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.debug_struct("WrappedSocket").finish_non_exhaustive()
+@@ -94,19 +194,31 @@ impl WrappedSocket {
+         inner: Arc<dyn AsyncUdpSocket>,
+         obfs: Obfs,
+         hop: Option<(u16, Hop)>,
++        factory: Option<SocketFactory>,
+         tasks: &Tasks,
+     ) -> Arc<Self> {
++        let sockets = Arc::new(Mutex::new(SocketSlots {
++            active: inner,
++            previous: None,
++            generation: 0,
++            recv_waker: None,
++            send_waker: None,
++        }));
+         let hop = hop
+             .filter(|(_, hop)| !hop.ports.is_empty())
+-            .map(|(base, hop)| HopState::start(base, hop, tasks));
++            .map(|(base, hop)| HopState::start(base, hop, sockets.clone(), factory, tasks));
+         Arc::new(WrappedSocket {
+-            inner,
++            sockets,
+             obfs,
+             hop,
+             scratch: Mutex::new(Vec::new()),
+         })
+     }
+ 
++    fn active_socket(&self) -> Arc<dyn AsyncUdpSocket> {
++        lock(&self.sockets).active.clone()
++    }
++
+     fn obfuscating(&self) -> bool {
+         !matches!(self.obfs, Obfs::None)
+     }
+@@ -114,19 +226,20 @@ impl WrappedSocket {
+     fn destination(&self, wanted: SocketAddr) -> SocketAddr {
+         let mut to = wanted;
+         if let Some(hop) = &self.hop {
+-            to.set_port(hop.current.load(Ordering::Relaxed));
++            to.set_port(hop.shared.current.load(Ordering::Relaxed));
+         }
+         to
+     }
+ 
+     fn send_raw(
+         &self,
++        socket: &dyn AsyncUdpSocket,
+         original: &Transmit<'_>,
+         destination: SocketAddr,
+         data: &[u8],
+         segment_size: Option<usize>,
+     ) -> io::Result<()> {
+-        self.inner.try_send(&Transmit {
++        socket.try_send(&Transmit {
+             destination,
+             ecn: original.ecn,
+             contents: data,
+@@ -258,24 +371,45 @@ impl AsyncUdpSocket for SingleReceive {
+ 
+ impl AsyncUdpSocket for WrappedSocket {
+     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+-        self.inner.clone().create_io_poller()
++        let (generation, active) = {
++            let slots = lock(&self.sockets);
++            (slots.generation, slots.active.clone())
++        };
++        if self.hop.is_none() {
++            return active.create_io_poller();
++        }
++        Box::pin(WrappedPoller {
++            sockets: self.sockets.clone(),
++            generation,
++            inner: active.create_io_poller(),
++        })
+     }
+ 
+     fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
++        if let Some(hop) = &self.hop {
++            hop.shared.active_tx.store(true, Ordering::Relaxed);
++        }
++        let socket = self.active_socket();
+         let to = self.destination(transmit.destination);
+         match &self.obfs {
+-            Obfs::None => self.send_raw(transmit, to, transmit.contents, transmit.segment_size),
++            Obfs::None => self.send_raw(
++                socket.as_ref(),
++                transmit,
++                to,
++                transmit.contents,
++                transmit.segment_size,
++            ),
+             Obfs::Seal(seal) => {
+                 let mut scratch = lock(&self.scratch);
+                 scratch.clear();
+                 seal.seal(transmit.contents, &mut scratch);
+-                self.send_raw(transmit, to, &scratch, None)
++                self.send_raw(socket.as_ref(), transmit, to, &scratch, None)
+             }
+             Obfs::Gecko(gecko) => {
+                 let mut datagrams = Vec::new();
+                 lock(gecko).seal(transmit.contents, &mut datagrams);
+                 for (index, datagram) in datagrams.iter().enumerate() {
+-                    match self.send_raw(transmit, to, datagram, None) {
++                    match self.send_raw(socket.as_ref(), transmit, to, datagram, None) {
+                         Ok(()) => {}
+                         Err(err) if index == 0 => return Err(err),
+                         Err(_) => break,
+@@ -293,7 +427,43 @@ impl AsyncUdpSocket for WrappedSocket {
+         meta: &mut [RecvMeta],
+     ) -> Poll<io::Result<usize>> {
+         loop {
+-            let received = ready!(self.inner.poll_recv(cx, bufs, meta))?;
++            let (generation, active, previous) = {
++                let mut slots = lock(&self.sockets);
++                if self.hop.is_some() {
++                    slots.recv_waker = Some(cx.waker().clone());
++                }
++                (slots.generation, slots.active.clone(), slots.previous.clone())
++            };
++            let polled = match active.poll_recv(cx, bufs, meta) {
++                Poll::Ready(result) => Poll::Ready(result),
++                Poll::Pending => {
++                    if let Some(prev) = previous {
++                        match prev.poll_recv(cx, bufs, meta) {
++                            Poll::Ready(Ok(n)) => Poll::Ready(Ok(n)),
++                            Poll::Ready(Err(_)) => {
++                                let mut slots = lock(&self.sockets);
++                                if slots.generation == generation {
++                                    slots.previous = None;
++                                }
++                                continue;
++                            }
++                            Poll::Pending => Poll::Pending,
++                        }
++                    } else {
++                        Poll::Pending
++                    }
++                }
++            };
++            let received = match polled {
++                Poll::Ready(Ok(count)) => count,
++                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
++                Poll::Pending => {
++                    if self.hop.is_some() && lock(&self.sockets).generation != generation {
++                        continue;
++                    }
++                    return Poll::Pending;
++                }
++            };
+             if !self.obfuscating() && self.hop.is_none() {
+                 return Poll::Ready(Ok(received));
+             }
+@@ -324,14 +494,14 @@ impl AsyncUdpSocket for WrappedSocket {
+     }
+ 
+     fn local_addr(&self) -> io::Result<SocketAddr> {
+-        self.inner.local_addr()
++        self.active_socket().local_addr()
+     }
+ 
+     fn max_transmit_segments(&self) -> usize {
+         if self.obfuscating() {
+             1
+         } else {
+-            self.inner.max_transmit_segments()
++            self.active_socket().max_transmit_segments()
+         }
+     }
+ 
+@@ -339,12 +509,12 @@ impl AsyncUdpSocket for WrappedSocket {
+         if cfg!(windows) {
+             1
+         } else {
+-            self.inner.max_receive_segments()
++            self.active_socket().max_receive_segments()
+         }
+     }
+ 
+     fn may_fragment(&self) -> bool {
+-        self.inner.may_fragment()
++        self.active_socket().may_fragment()
+     }
+ }
+ 
+@@ -354,6 +524,8 @@ impl AsyncUdpSocket for WrappedSocket {
+     reason = "the tests talk to loopback sockets directly"
+ )]
+ mod tests {
++    use std::task::ready;
++
+     use quinn::{Runtime, TokioRuntime};
+ 
+     use super::*;
+@@ -363,11 +535,20 @@ mod tests {
+         socket: tokio::net::UdpSocket,
+         obfs: Obfs,
+         hop: Option<(u16, Hop)>,
++    ) -> Arc<WrappedSocket> {
++        wrap_with_factory(socket, obfs, hop, None)
++    }
++
++    fn wrap_with_factory(
++        socket: tokio::net::UdpSocket,
++        obfs: Obfs,
++        hop: Option<(u16, Hop)>,
++        factory: Option<SocketFactory>,
+     ) -> Arc<WrappedSocket> {
+         let inner = TokioRuntime
+             .wrap_udp_socket(socket.into_std().unwrap())
+             .unwrap();
+-        WrappedSocket::new(inner, obfs, hop, &Default::default())
++        WrappedSocket::new(inner, obfs, hop, factory, &Default::default())
+     }
+ 
+     async fn send(socket: &Arc<WrappedSocket>, to: SocketAddr, data: &[u8]) {
+@@ -453,4 +634,79 @@ mod tests {
+         let (data, _) = receive(&socket).await;
+         assert_eq!(data, b"reply");
+     }
++
++    #[tokio::test(start_paused = true)]
++    async fn port_hopping_rotates_local_socket_and_drains_previous_replies() {
++        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let first = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let second = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let base = first.local_addr().unwrap();
++        let other = second.local_addr().unwrap();
++        let hop = Hop {
++            ports: vec![other.port()],
++            min: Duration::from_secs(5),
++            max: Duration::from_secs(5),
++        };
++        let factory: SocketFactory = Arc::new(|| {
++            let std_sock = std::net::UdpSocket::bind("127.0.0.1:0")?;
++            std_sock.set_nonblocking(true)?;
++            TokioRuntime.wrap_udp_socket(std_sock)
++        });
++        let socket = wrap_with_factory(client, Obfs::None, Some((base.port(), hop)), Some(factory));
++
++        send(&socket, base, b"one").await;
++        let mut buf = [0u8; 16];
++        let (len, from_old) = first.recv_from(&mut buf).await.unwrap();
++        assert_eq!(buf.get(..len), Some(&b"one"[..]));
++
++        tokio::time::sleep(Duration::from_secs(6)).await;
++        send(&socket, base, b"two").await;
++        let (len, from_new) = second.recv_from(&mut buf).await.unwrap();
++        assert_eq!(buf.get(..len), Some(&b"two"[..]));
++        assert_ne!(from_old.port(), from_new.port(), "local source port did not rotate");
++
++        // In-flight reply to the previous socket still arrives with base_port.
++        first.send_to(b"inflight", from_old).await.unwrap();
++        let (data, source) = receive(&socket).await;
++        assert_eq!(data, b"inflight");
++        assert_eq!(source.port(), base.port());
++
++        // Replies to the new rotated socket also arrive with base_port.
++        second.send_to(b"fresh", from_new).await.unwrap();
++        let (data, source) = receive(&socket).await;
++        assert_eq!(data, b"fresh");
++        assert_eq!(source.port(), base.port());
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn idle_hop_interval_skips_rotation() {
++        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let first = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let second = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let base = first.local_addr().unwrap();
++        let other = second.local_addr().unwrap();
++        let hop = Hop {
++            ports: vec![other.port()],
++            min: Duration::from_secs(5),
++            max: Duration::from_secs(5),
++        };
++        let created = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++        let counted = created.clone();
++        let factory: SocketFactory = Arc::new(move || {
++            counted.fetch_add(1, Ordering::Relaxed);
++            let std_sock = std::net::UdpSocket::bind("127.0.0.1:0")?;
++            std_sock.set_nonblocking(true)?;
++            TokioRuntime.wrap_udp_socket(std_sock)
++        });
++        let socket = wrap_with_factory(client, Obfs::None, Some((base.port(), hop)), Some(factory));
++
++        // Sleep past multiple hop intervals without sending any traffic.
++        tokio::time::sleep(Duration::from_secs(16)).await;
++        assert_eq!(created.load(Ordering::Relaxed), 0);
++
++        send(&socket, base, b"still-base").await;
++        let mut buf = [0u8; 16];
++        let (len, _) = first.recv_from(&mut buf).await.unwrap();
++        assert_eq!(buf.get(..len), Some(&b"still-base"[..]));
++    }
+ }
+diff --git a/crates/quic/src/transport.rs b/crates/quic/src/transport.rs
+index ee7b526..7f2583f 100644
+--- a/crates/quic/src/transport.rs
++++ b/crates/quic/src/transport.rs
+@@ -4,7 +4,7 @@ use std::time::Duration;
+ use quinn::congestion::ControllerFactory;
+ use quinn::{IdleTimeout, TransportConfig, VarInt};
+ 
+-use crate::{INITIAL_PACKET_SIZE, datagram_buffer, transport_config};
++use crate::{INITIAL_PACKET_SIZE, SwitchFactory, datagram_buffer, transport_config};
+ 
+ pub const MAX_IDLE: Duration = Duration::from_secs(30);
+ pub const STREAM_WINDOW: u64 = 15_728_640;
+@@ -23,6 +23,7 @@ pub fn bbr_window(cwnd: u32) -> u64 {
+     or_default(cwnd, DEFAULT_CWND) * INITIAL_PACKET_SIZE
+ }
+ 
++#[derive(Clone)]
+ pub struct Transport {
+     pub stream_window: u64,
+     pub conn_window: u64,
+@@ -65,4 +66,13 @@ impl Transport {
+         }
+         Arc::new(config)
+     }
++
++    pub fn build_switch(
++        mut self,
++        initial: Arc<dyn ControllerFactory + Send + Sync>,
++    ) -> (Arc<TransportConfig>, Arc<SwitchFactory>) {
++        let factory = SwitchFactory::new(initial);
++        self.congestion = Some(factory.clone());
++        (self.build(), factory)
++    }
  }
 diff --git a/crates/rules/src/activity.rs b/crates/rules/src/activity.rs
 new file mode 100644

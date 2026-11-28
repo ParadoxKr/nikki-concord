@@ -6,7 +6,7 @@
 
 **简体中文 · [English](README.en.md)**
 
-[![Release](https://img.shields.io/github/v/release/user-7392/nikki-concord?include_prereleases&label=Release&color=blue)](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r31)
+[![Release](https://img.shields.io/github/v/release/user-7392/nikki-concord?include_prereleases&label=Release&color=blue)](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32)
 [![OpenWrt](https://img.shields.io/badge/OpenWrt-25.12%20%7C%2024.10%20%7C%2023.05-00B5E2)](#下载安装)
 [![Arch](https://img.shields.io/badge/Arch-aarch64%20%7C%20x86__64-555555)](#下载安装)
 [![License](https://img.shields.io/badge/License-GPL--3.0--or--later-green)](#上游项目与许可)
@@ -85,17 +85,17 @@ opkg print-architecture
 
 ### 2. 下载对应安装包
 
-前往 [**v0.1.0-r31 发布页**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r31) 下载与设备架构匹配的包（校验值见发布页 `SHA256SUMS-r31-all`）：
+前往 [**v0.1.0-r32 发布页**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32) 下载与设备架构匹配的包（校验值见发布页 `SHA256SUMS-r32-all`）：
 
 | 架构 | OpenWrt 25.12+（`.apk`） | OpenWrt / ImmortalWrt 23.05 & 24.10（`.ipk`） |
 | :--- | :--- | :--- |
-| `aarch64_cortex-a53` | `luci-app-nikki-concord-0.1.0-r31.apk` | `luci-app-nikki-concord-0.1.0-r31_aarch64_cortex-a53.ipk` |
-| `aarch64_cortex-a72` | `luci-app-nikki-concord-0.1.0-r31_aarch64_cortex-a72.apk` | `luci-app-nikki-concord-0.1.0-r31_aarch64_cortex-a72.ipk` |
-| `aarch64_generic` | `luci-app-nikki-concord-0.1.0-r31_aarch64_generic.apk` | `luci-app-nikki-concord-0.1.0-r31_aarch64_generic.ipk` |
-| `x86_64` | `luci-app-nikki-concord-0.1.0-r31_x86_64.apk` | `luci-app-nikki-concord-0.1.0-r31_x86_64.ipk` |
+| `aarch64_cortex-a53` | `luci-app-nikki-concord-0.1.0-r32.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a53.ipk` |
+| `aarch64_cortex-a72` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a72.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_cortex-a72.ipk` |
+| `aarch64_generic` | `luci-app-nikki-concord-0.1.0-r32_aarch64_generic.apk` | `luci-app-nikki-concord-0.1.0-r32_aarch64_generic.ipk` |
+| `x86_64` | `luci-app-nikki-concord-0.1.0-r32_x86_64.apk` | `luci-app-nikki-concord-0.1.0-r32_x86_64.ipk` |
 
 > [!NOTE]
-> **可选 LightGBM 实验分支**：主包本身已原生支持 `smart` 策略组（启发式选线），绝大多数用户直接使用主包即可。如需 `uselightgbm: true` 模型推理，可前往独立实验分支发布页下载 [**v0.1.0-r31-lgbm**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r31-lgbm)（不合入 `main`，主包「检查更新」会自动忽略该标签）。
+> **可选 LightGBM 实验分支**：主包本身已原生支持 `smart` 策略组（启发式选线），绝大多数用户直接使用主包即可。如需 `uselightgbm: true` 模型推理，可前往独立实验分支发布页下载 [**v0.1.0-r32-lgbm**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32-lgbm)（不合入 `main`，主包「检查更新」会自动忽略该标签）。
 
 ### 3. 安装、启用与后续升级
 
@@ -118,7 +118,7 @@ opkg update && opkg install ./文件名.ipk
 
 ## 注意事项
 
-与 Mihomo 的主要行为差异（完整协议与字段清单见 [Concord 上游兼容性说明](https://github.com/Vialibrex/concord/blob/69423a87d008b9016ddd23089ba738ee58c04fad/docs/compatibility.md)）：
+与 Mihomo 的主要行为差异（完整协议与字段清单见 [Concord 上游兼容性说明](https://github.com/Vialibrex/concord/blob/faaadad9c93d1967d44a65732bfcb02b7a93aefc/docs/compatibility.md)）：
 
 | 分类 | 说明 |
 | :--- | :--- |
@@ -173,10 +173,10 @@ python3 build-root.py --direct-core --cpu "$cpu" --core "build/concord-$cpu.gz" 
 node check-luci.mjs "build/package-$cpu"
 
 # 打包 OpenWrt 25.12+ (.apk)
-python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r31_$arch.apk"
+python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$arch.apk"
 
 # 打包 OpenWrt / ImmortalWrt 23.05 & 24.10 (.ipk)
-python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r31_$arch.ipk"
+python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$arch.ipk"
 ```
 
 ARM64 三种架构（`aarch64_cortex-a53`、`aarch64_cortex-a72`、`aarch64_generic`）共用 `cpu=aarch64` 的编译产物，打包时替换 `arch` 即可；构建 `x86_64` 时将 `cpu` 和 `arch` 均设为 `x86_64`。
