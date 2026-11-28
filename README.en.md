@@ -2,7 +2,7 @@
 
 # Nikki Concord
 
-**Low-memory transparent proxy for OpenWrt · Based on OpenWrt Nikki, with the Rust Concord core and Zashboard bundled**
+**Experimental OpenWrt port evaluating the Rust Concord core · Based on OpenWrt Nikki**
 
 **[简体中文](README.md) · English**
 
@@ -11,22 +11,20 @@
 [![Arch](https://img.shields.io/badge/Arch-aarch64%20%7C%20x86__64-555555)](#installation)
 [![License](https://img.shields.io/badge/License-GPL--3.0--or--later-green)](#upstream-projects-and-licenses)
 
-[Flash and memory usage](#flash-and-memory-usage) · [Installation](#installation) · [Notes](#notes) · [Router adaptations](#router-adaptations) · [Building from source](#building-from-source) · [Upstream projects and licenses](#upstream-projects-and-licenses)
+[Disclaimer](#experimental-notice--disclaimer) · [Footprint](#flash-and-memory-usage) · [Installation](#installation) · [Notes](#notes) · [Build](#building-from-source) · [Licenses](#upstream-projects-and-licenses)
 
 </div>
 
 ---
 
-## Overview
+## Experimental Notice & Disclaimer
 
-**Nikki Concord** is a lightweight transparent proxy package for OpenWrt (**Services → Nikki Concord**).
+> [!IMPORTANT]
+> - **Experimental purpose & no long-term maintenance**: This repository is a personal, experimental project created to **evaluate the real-world runtime behavior and flash/memory footprint of the Rust-based Concord core on resource-constrained OpenWrt routers**. It is **not** a long-term maintained project, carries no guarantee of future updates, bug fixes, or support, and may be discontinued or archived at any time. Interested users are encouraged to fork and build from source, or wait for potential official integration in upstream [OpenWrt Nikki](https://github.com/nikkinikki-org/OpenWrt-nikki).
+> - **Intended use & compliance**: This repository only contains open-source integration, build, and packaging scripts. It **does not** include, provide, host, or endorse any proxy nodes, subscriptions, or third-party network services. All code and prebuilt artifacts are provided **"AS IS"** without warranty of any kind, strictly for lawful technical learning, benchmarking, and research. Users assume all risks and responsibility for complying with applicable local laws and regulations.
+> - **No affiliation**: This project is independent and not affiliated with or endorsed by OpenWrt, OpenWrt Nikki, Concord, or Zashboard. All upstream copyrights and licenses remain with their respective authors.
 
-- **Separate installation.** Own UCI config, init script, and nftables table so it can coexist with original Nikki (use core-only mode with separate ports for side-by-side testing).
-- **Lower memory and flash usage.** Powered by the Rust [Concord](https://github.com/Vialibrex/concord) core with router-tuned `jemalloc`.
-- **All-in-one package.** Bundles Concord, classic & modern LuCI UI (classic by default), Chinese translations, [Zashboard](https://github.com/Zephyruso/zashboard), and in-LuCI one-click upgrades.
-
-> [!NOTE]
-> Concord is in pre-1.0 development; packages are published as prereleases. Stop other transparent proxies before switching traffic to Nikki Concord.
+This package ports [OpenWrt Nikki](https://github.com/nikkinikki-org/OpenWrt-nikki)'s service scripts and LuCI UI into a separate namespace (**Services → Nikki Concord**, isolated UCI config and nftables table) bundled with the [Concord](https://github.com/Vialibrex/concord) core and [Zashboard](https://github.com/Zephyruso/zashboard) for side-by-side evaluation.
 
 ---
 
@@ -38,20 +36,17 @@
   <img alt="Nikki Concord flash and memory footprint comparison" src="assets/benchmark-en-light.svg" width="100%" />
 </picture>
 
-**Daily use on the E8450 (maintainer’s dashboard observation).** Nikki Concord r27 used about **28–34 MiB RSS**. The chart’s idle and peak figures come from a roughly 50-second isolated benchmark with DNS Fake-IP and TUN enabled on both sides. The daily observation covers real client traffic with TCP redirection and UDP over TUN.
+**Daily observation on Linksys E8450**: Nikki Concord r27 used roughly **28–34 MiB RSS**; the chart's idle and peak figures come from an isolated ~50-second load test on OpenWrt 25.12.6.
 
 <details>
-<summary>View detailed numbers, isolated load test setup, and results</summary>
+<summary>View detailed numbers and benchmark conditions</summary>
 
-| Metric | Original Nikki 1.26.2 + Mihomo v1.19.34 | Nikki Concord | Reduction |
+| Metric | Original Nikki 1.26.2 + Mihomo v1.19.34 | Nikki Concord (r27) | Difference |
 | :--- | ---: | ---: | ---: |
-| **Flash** (total uncompressed installed files) | **54.82 MiB** | r27 **29.51 MiB** | **25.31 MiB (46.2%)** |
-| **Memory** (combined service-process RSS) | Idle **46.58 MiB** · Peak **79.49 MiB** | r27 idle **16.23 MiB** · Peak **18.58 MiB** | Idle **30.35 MiB** · Peak **60.91 MiB** |
+| **Flash** (uncompressed installed files) | **54.82 MiB** | **29.51 MiB** | **-25.31 MiB (-46.2%)** |
+| **Memory** (combined service RSS) | Idle **46.58 MiB** · Peak **79.49 MiB** | Idle **16.23 MiB** · Peak **18.58 MiB** | Idle **-30.35 MiB** · Peak **-60.91 MiB** |
 
-- **Prior daily use of the original build.** Original Nikki + Mihomo used about **40 MiB** idle and **70–90 MiB** during normal use on the maintainer’s router.
-- **Flash measurement.** The Concord figure uses the uncompressed files in the r27 E8450 (aarch64_cortex-a53) APK. The total includes the core and other bundled files. Shared system dependencies and files downloaded or cached at runtime are excluded. Filesystem compression affects actual usage. Leave room to unpack and replace files during an upgrade.
-- **r27 isolated test setup.** Both services ran in turn on a Linksys E8450 with OpenWrt 25.12.6 in an isolated network. They used the same subscription with 48 local SOCKS5 test nodes and eight rule sets totaling 120,290 rules, seven from the router's cache. Both enabled DNS Fake-IP, Fake-IP persistence, and TUN. The client resolves a different test hostname for each request, checks that DNS returns a Fake-IP, and sends TCP traffic through TUN. Idle RSS is the median of five samples. RSS was sampled about once per second under load. Concord's RSS includes the core and logging process.
-- **Results.** Each service completed 1,000 HTTPS requests with zero failures at about 20 new requests per second, up to 32 concurrent requests, over about 50 seconds. About 60% went through proxy nodes and 40% went direct. Both reached about **2.54 MiB/s**. After 30 seconds idle, original Nikki was at **79.50 MiB** and Concord at **18.55 MiB**. The test covered Fake-IP DNS and TCP HTTPS over TUN in an isolated network. Public proxy nodes, application UDP traffic, and maximum throughput were outside its scope.
+- **Setup**: Isolated network, 48 local SOCKS5 test nodes, 8 rule sets (120,290 rules), DNS Fake-IP + persistence + TUN enabled; ~20 new HTTPS requests/s (up to 32 concurrent, ~50 s, 1,000 requests with 0 failures at ~2.54 MiB/s). After 30 s idle: 79.50 MiB vs 18.55 MiB.
 
 </details>
 
@@ -59,33 +54,12 @@
 
 ## Installation
 
-### Supported firmware and architectures
+- **Supported firmware**: **OpenWrt 25.12.x** (`.apk`), and **OpenWrt / ImmortalWrt 23.05 / 24.10** with `opkg` + `firewall4` (`.ipk`; feeds must provide Go `yq` and `rpcd-mod-ucode`; `iptables / fw3` is unsupported).
+- **Testing note**: Only `.apk` has been tested on physical OpenWrt 25.12 hardware; `.ipk` packages were checked for structure and scripts only. Back up your config before installing.
 
-| Item | Details |
-| --- | --- |
-| **Firmware** | **OpenWrt 25.12.x** (`apk`), and **OpenWrt / ImmortalWrt 23.05 / 24.10** with `opkg` + `firewall4` (feeds must provide Go `yq` and `rpcd-mod-ucode`; `iptables / fw3` is unsupported) |
-| **Architectures** | `aarch64_cortex-a53` · `aarch64_cortex-a72` · `aarch64_generic` · `x86_64` |
-| **Packages** | Both **`.apk`** (25.12+) and **`.ipk`** (23.05 / 24.10) per architecture; kernel module dependencies come from firmware feeds |
+Check architecture: `cat /etc/apk/arch` (25.12+) or `opkg print-architecture` (23.05 / 24.10).
 
-> [!WARNING]
-> Only `.apk` has been tested on physical OpenWrt 25.12 hardware. `.ipk` packages were checked for structure and control scripts only—back up your router config before installing on 23.05 or 24.10.
-
-### 1. Check your firmware and architecture
-
-```sh
-# Firmware version
-cat /etc/openwrt_release
-
-# OpenWrt 25.12+ (apk)
-cat /etc/apk/arch
-
-# OpenWrt / ImmortalWrt 23.05 and 24.10 (opkg)
-opkg print-architecture
-```
-
-### 2. Download the matching package
-
-Download the package for your architecture from the [v0.1.0-r32 release](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32). Checksums are in `SHA256SUMS-r32-all`.
+Download from the [**v0.1.0-r32 release**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32) (checksums in `SHA256SUMS-r32-all`):
 
 | Architecture | OpenWrt 25.12+ (`.apk`) | OpenWrt / ImmortalWrt 23.05 and 24.10 (`.ipk`) |
 | :--- | :--- | :--- |
@@ -95,11 +69,9 @@ Download the package for your architecture from the [v0.1.0-r32 release](https:/
 | `x86_64` | `luci-app-nikki-concord-0.1.0-r32_x86_64.apk` | `luci-app-nikki-concord-0.1.0-r32_x86_64.ipk` |
 
 > [!NOTE]
-> **Optional LightGBM experimental branch.** The main build already supports `smart` proxy groups natively (heuristic scoring), which is sufficient for most users. If you specifically want `uselightgbm: true` model inference, download [**v0.1.0-r32-lgbm**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32-lgbm) from the separate experimental branch (kept out of `main` and ignored by the main build's Check Update).
+> For experimental `uselightgbm: true` inference in `smart` groups, see the separate branch release [**v0.1.0-r32-lgbm**](https://github.com/user-7392/nikki-concord/releases/tag/v0.1.0-r32-lgbm) (the main build already supports heuristic `smart` groups).
 
-### 3. Install, enable, and upgrade
-
-Upload the package to your router and substitute its filename in the matching command.
+Upload to your router and install (disabled by default; enable under **Services → Nikki Concord** after stopping other transparent proxies):
 
 ```sh
 # OpenWrt 25.12+ (apk)
@@ -109,37 +81,22 @@ apk add --allow-untrusted ./package.apk
 opkg update && opkg install ./package.ipk
 ```
 
-> [!TIP]
-> - **First start.** The service is disabled after a fresh install. Open **Services → Nikki Concord**, configure your subscription/profile, enable the service, and save.
-> - **Upgrades.** Use **Check Update → Upgrade Now** in the LuCI status bar (`apk` and `opkg` supported; user configuration is preserved).
-> - **UI switcher.** Opens in the classic LuCI UI by default; click **Modern UI** on the right side of the App Config subtitle row to switch anytime.
-
 ---
 
 ## Notes
 
-Key behavioral differences from Mihomo (full protocol and field list: [Concord compatibility](https://github.com/Vialibrex/concord/blob/faaadad9c93d1967d44a65732bfcb02b7a93aefc/docs/compatibility.md)):
+Full protocol and field list: [Concord compatibility](https://github.com/Vialibrex/concord/blob/faaadad9c93d1967d44a65732bfcb02b7a93aefc/docs/compatibility.md).
 
-| Area | Details |
-| :--- | :--- |
-| **TUN** | Configure TUN via top-level `tun:` (`type: tun` inside `listeners` is not opened). Legacy stack names `mips`, `mixed`, `system`, and `gvisor` all use Concord's userspace stack. |
-| **Rule sets and GeoIP** | Keep local rule/proxy providers under `/etc/nikkic/run/core/` with relative paths. `SAFE_PATHS`, custom `GeoIP.dat`, and `BundleMRS.7z` are unsupported. |
-| **DNS** | `dns.fallback-filter` defaults to `geoip: false` (set explicitly with an MMDB to match Mihomo). `dhcp://<interface>` is treated as `system://`—use explicit upstream DNS servers if dnsmasq forwards to Concord to avoid loops. |
-| **Dashboard and Fast Reload** | A non-loopback controller requires an API secret; clear both controller addresses to disable it. With Fast Reload enabled, click **Restart Service** after changing controller address, secret, TLS, or dashboard URL. |
-
----
-
-## Router adaptations
-
-- **Memory and flash wear.** Linux musl builds use router-tuned `jemalloc` (4 KiB pages, single arena, prompt reclamation) and cap `/group/:name/delay` at 10 concurrent probes; `profile.store-fake-ip` batches writes in 30-second windows.
-- **Networking and config.** Optional IPv6-first TCP dialing for proxy servers (**Mixin Config → General Config**); unknown top-level Mihomo keys are ignored silently while preserving YAML anchors; reloads and upgrades preflight configs and preserve the running state on error.
-- **Dashboard and logs.** Built-in controller serves Zashboard and HTTPS with `POST /upgrade/geo`, rule hit stats, and temporary per-rule disabling; application and core logs are each capped at **1 MiB** (trimmed to ~256 KiB).
+- **TUN**: Configure via top-level `tun:` (`type: tun` in `listeners` is not opened); `mips`, `mixed`, `system`, and `gvisor` all map to Concord's userspace stack.
+- **Rule sets & GeoIP**: Place local providers under `/etc/nikkic/run/core/` with relative paths; `SAFE_PATHS`, custom `GeoIP.dat`, and `BundleMRS.7z` are unsupported.
+- **DNS**: `dns.fallback-filter` defaults to `geoip: false`; `dhcp://<interface>` is handled as `system://`—use explicit upstreams if dnsmasq forwards to Concord.
+- **Dashboard & Fast Reload**: Non-loopback controllers require an API secret; with Fast Reload enabled, click **Restart Service** after changing controller address, secret, TLS, or dashboard URL.
 
 ---
 
 ## Building from source
 
-You need `git`, `python3`, `node`, `gzip`, `unzip`, `po2lmo` from the OpenWrt LuCI SDK (on `PATH` or under `build/`), Concord's pinned Rust toolchain, and `zig` and `cargo-zigbuild` for Linux musl targets.
+Requires `git`, `python3`, `node`, `gzip`, `unzip`, `po2lmo` from the OpenWrt LuCI SDK, Concord's pinned Rust toolchain, `zig`, and `cargo-zigbuild`.
 
 <details>
 <summary>Cross-build and packaging commands</summary>
@@ -179,7 +136,7 @@ python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$
 python3 pack.py "build/package-$cpu" "release/luci-app-nikki-concord-0.1.0-r32_$arch.ipk"
 ```
 
-The three ARM64 package architectures (`aarch64_cortex-a53`, `aarch64_cortex-a72`, and `aarch64_generic`) share the `cpu=aarch64` build. Set `arch` to select the package architecture. For x86-64, set both `cpu` and `arch` to `x86_64`.
+All three ARM64 architectures share the `cpu=aarch64` build; set both `cpu` and `arch` to `x86_64` for x86-64.
 
 </details>
 
@@ -187,16 +144,8 @@ The three ARM64 package architectures (`aarch64_cortex-a53`, `aarch64_cortex-a72
 
 ## Upstream projects and licenses
 
-| Project | Role | Source and notices |
+| Project | Role | Notes |
 | :--- | :--- | :--- |
-| [**OpenWrt Nikki**](https://github.com/nikkinikki-org/OpenWrt-nikki) | Service scripts and LuCI base | The repository includes the v1.26.2 source used for builds and its license. |
-| [**Concord**](https://github.com/Vialibrex/concord) | Rust proxy core | The pinned revision and project patches are under `core/`. Upstream third-party licenses are retained with the source. |
-| [**Zashboard v3.30.0**](https://github.com/Zephyruso/zashboard/releases/tag/v3.30.0) | Bundled web dashboard | Upstream licenses and third-party notices are retained. |
-
----
-
-<div align="center">
-
-<sub>Built collaboratively by **Human + GPT + Gemini** · Developed with regular rest and reasonable working hours, free from inhumane coercion.</sub>
-
-</div>
+| [**OpenWrt Nikki**](https://github.com/nikkinikki-org/OpenWrt-nikki) | Service scripts and LuCI base | v1.26.2 source and license retained in this repo |
+| [**Concord**](https://github.com/Vialibrex/concord) | Rust network core | Pinned revision and patches under `core/`; third-party licenses retained |
+| [**Zashboard v3.30.0**](https://github.com/Zephyruso/zashboard/releases/tag/v3.30.0) | Bundled web dashboard | Original license and notices retained |
