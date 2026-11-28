@@ -21,6 +21,14 @@
 
 ---
 
+## 实验关注点
+
+这个实验想了解，在闪存和内存有限的 OpenWrt 路由器上，运行 Rust 编写的 Concord 核心会怎样影响整套服务的资源占用和运行表现。以 Linksys E8450 为例，观察解包后的文件大小，以及服务在空载、短时并发和停压后的内存占用。
+
+下方对比采用相同的隔离负载，记录两套部署的 RSS、请求完成情况和吞吐。结果反映这两套部署在该条件下的表现，包含核心实现和内存分配器设置的影响。本次对比未覆盖长期稳定性、CPU 开销和极限吞吐。
+
+---
+
 ## 闪存与内存对比
 
 <picture>
@@ -47,11 +55,8 @@
 
 ## 注意事项
 
-完整协议与字段差异见 [Concord 上游兼容性说明](https://github.com/Vialibrex/concord/blob/faaadad9c93d1967d44a65732bfcb02b7a93aefc/docs/compatibility.md)：
+完整协议与字段差异见 [Concord 上游兼容性说明](https://github.com/Vialibrex/concord/blob/faaadad9c93d1967d44a65732bfcb02b7a93aefc/docs/compatibility.md)。
 
-- **TUN**：须通过顶层 `tun:` 启用（`listeners` 中的 `type: tun` 不会启用）；`mips`、`mixed`、`system`、`gvisor` 均对应同一个 Concord 用户态栈。
-- **规则与 GeoIP**：本地规则集/代理集须放在 `/etc/nikkic/run/core/` 下使用相对路径；不支持 `SAFE_PATHS`、自定义 `GeoIP.dat` 与 `BundleMRS.7z`。
-- **DNS**：`dns.fallback-filter` 默认 `geoip: false`；`dhcp://<接口>` 按 `system://` 处理，避免与 dnsmasq 形成解析环路。
 - **面板与快速重载**：对外监听控制器须配置 API 密钥；开启快速重载时，变更控制器地址、密钥、TLS 或面板链接后需点击「重启服务」。
 
 ---

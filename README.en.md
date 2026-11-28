@@ -21,6 +21,14 @@ This package ports [OpenWrt Nikki](https://github.com/nikkinikki-org/OpenWrt-nik
 
 ---
 
+## What the experiment measures
+
+This experiment explores how running the Rust-based Concord core affects resource usage and runtime behavior on OpenWrt routers with limited flash and RAM. On a Linksys E8450, it tracks unpacked file size and service memory use at idle, during a short concurrent workload, and after the load stops.
+
+The comparison below records RSS, request completion, and throughput for both deployments under the same isolated workload. The figures reflect how each full deployment behaves under those conditions, including the effects of the core implementation and allocator settings. Long-term stability, CPU overhead, and maximum throughput are still untested in this comparison.
+
+---
+
 ## Flash and memory usage
 
 <picture>
@@ -49,9 +57,6 @@ This package ports [OpenWrt Nikki](https://github.com/nikkinikki-org/OpenWrt-nik
 
 Full protocol and field list: [Concord compatibility](https://github.com/Vialibrex/concord/blob/faaadad9c93d1967d44a65732bfcb02b7a93aefc/docs/compatibility.md).
 
-- **TUN**: Configure via top-level `tun:` (`type: tun` in `listeners` is not opened); `mips`, `mixed`, `system`, and `gvisor` all map to Concord's userspace stack.
-- **Rule sets & GeoIP**: Place local providers under `/etc/nikkic/run/core/` with relative paths; `SAFE_PATHS`, custom `GeoIP.dat`, and `BundleMRS.7z` are unsupported.
-- **DNS**: `dns.fallback-filter` defaults to `geoip: false`; `dhcp://<interface>` is handled as `system://`—use explicit upstreams if dnsmasq forwards to Concord.
 - **Dashboard & Fast Reload**: Non-loopback controllers require an API secret; with Fast Reload enabled, click **Restart Service** after changing controller address, secret, TLS, or dashboard URL.
 
 ---
